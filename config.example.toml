@@ -1,0 +1,33 @@
+# Copy to config.toml. Docker, CLI and Python read the same file explicitly.
+# HTTP network-operation timeout for API requests and signed transfers.
+request_timeout_seconds = 60
+# Concurrent local documents in a batch. Set to 1 to process them serially.
+local_workers = 4
+
+[chunking]
+target_input_bytes = 2400
+max_input_bytes = 6000
+
+[mineru]
+# A nonempty MINERU_API_KEY environment variable overrides api_key.
+api_base_url = "https://mineru.net"
+api_key = ""
+# Deadline for allocation, upload, and polling per provider group.
+timeout_seconds = 1800
+# Maximum files in one provider group. Valid range is 1 to 50.
+batch_size = 50
+model_version = "vlm"
+enable_formula = true
+enable_table = true
+language = "ch"
+is_ocr = false
+
+# To enable embeddings, uncomment this entire table and fill in your service.
+# api_base_url is the API base URL; the client appends /embeddings.
+# A nonempty EMBEDDING_API_KEY environment variable overrides api_key.
+# Set dimensions only if the embedding service supports this parameter.
+# [embedding]
+# model = "your-embedding-model"
+# api_base_url = "https://your-provider.example/v1"
+# api_key = ""
+# dimensions = 1024

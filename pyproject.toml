@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "multimodal-doc-pipeline"
+version = "0.1.0"
+description = "Portable document processing with MinerU and configurable embeddings"
+requires-python = ">=3.11"
+dependencies = [
+  "httpx>=0.28,<1",
+  "pydantic>=2.12,<3",
+  "markdown-it-py>=4,<5",
+  "mdit-py-plugins>=0.5,<1",
+  "docutils>=0.22,<0.24",
+  "pylatexenc==2.10",
+  "beautifulsoup4>=4.14,<5",
+  "PyYAML>=6,<7",
+  "Pillow>=12,<13",
+  "pypdf>=6,<7",
+]
+
+[project.scripts]
+doc-pipeline = "doc_pipeline.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=9,<10", "ruff>=0.14,<1"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/doc_pipeline"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--import-mode=importlib"
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

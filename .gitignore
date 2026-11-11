@@ -1,0 +1,30 @@
+# Local environment and secrets
+.venv/
+.env
+.env.*
+!.env.example
+config.toml
+
+# Python tooling and build output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+.coverage
+htmlcov/
+
+# Generated artifacts
+out/
+samples/
+
+# Editor and operating-system files
+.idea/
+.DS_Store
+
+# Local agent configuration
+.agents/
+
+.audit/
