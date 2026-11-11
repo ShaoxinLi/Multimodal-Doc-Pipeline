@@ -71,7 +71,7 @@ For batches, local documents run in a thread pool controlled by `local_workers`.
 
 Caught failures belong to individual files, so one failed document does not stop the remaining batch. Embedding failures are recorded per chunk and leave parsed content available. A successful embedding response with missing vectors or repeated input indices triggers one resend of the same batch. If that resend fails, processing continues with the next batch. The Python single-file API raises fatal processing errors. The batch API records caught file errors in `run.json`.
 
-Each run requires an empty or nonexistent output directory. There is no resume or overwrite mode. Each document writes to a temporary sibling directory and publishes the whole bundle by renaming it after the report is ready. A caught file failure discards that temporary bundle. A sudden process stop can leave temporary files, and an interrupted batch may have no final `run.json`.
+Each run requires an empty or nonexistent output directory. There is no resume or overwrite mode. Batch documents and single documents with a new destination publish their staged directory in one rename. For an existing single-document destination, including a Docker mount, the pipeline stages inside that directory and moves each artifact into place, with `report.json` last. A caught failure cleans up staged files. A sudden process stop can leave temporary files or artifacts without a report. An interrupted batch may have no final `run.json`.
 
 ## Where responsibilities live
 

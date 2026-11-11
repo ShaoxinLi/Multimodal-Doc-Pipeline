@@ -6,7 +6,6 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from stat import S_IMODE
 from zipfile import BadZipFile, ZipFile
 
 import httpx
@@ -115,17 +114,38 @@ def _finalize(document: _Document, config: Config, client: httpx.Client,
     destination, record = document.output_dir, document.record
     with record.measure("write"):
         destination.parent.mkdir(parents=True, exist_ok=True)
-        staging = tempfile.TemporaryDirectory(prefix=f".doc-{record.index + 1:04d}-", dir=destination.parent)
+        preserve_directory = destination == document.output_root and destination.is_dir()
+        staging = tempfile.TemporaryDirectory(
+            prefix=f".doc-{record.index + 1:04d}-",
+            dir=destination if preserve_directory else destination.parent,
+        )
     with staging as temporary:
         output_dir = Path(temporary) / "bundle"
         with record.measure("write"):
             output_dir.mkdir()
         report = _write_document(document, output_dir, config, client, limits, archive)
         with record.measure("write"):
-            if destination.exists():
-                output_dir.chmod(S_IMODE(destination.stat().st_mode))
-            output_dir.replace(destination)
+            if preserve_directory:
+                _publish_into_directory(output_dir, destination)
+            else:
+                output_dir.replace(destination)
     return report
+
+
+def _publish_into_directory(bundle: Path, destination: Path) -> None:
+    if any(path != bundle.parent for path in destination.iterdir()):
+        raise PipelineError("write", "output_not_empty")
+    report = bundle / "report.json"
+    artifacts = [path for path in bundle.iterdir() if path != report]
+    published = []
+    try:
+        for path in [*artifacts, report]:
+            path.rename(destination / path.name)
+            published.append(path)
+    except (OSError, KeyboardInterrupt):
+        for path in reversed(published):
+            (destination / path.name).rename(path)
+        raise
 
 
 def _write_document(document: _Document, output_dir: Path, config: Config, client: httpx.Client,

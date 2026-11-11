@@ -2,11 +2,13 @@ import json
 import subprocess
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from threading import Event, Thread
 
 import pytest
 from PIL import Image
 
+from doc_pipeline import process_file
 from tests.support import PROJECT_ROOT, document_archive, pdf_bytes, read_output, write_source_pdf
 
 
@@ -28,10 +30,12 @@ def test_cli_accepts_file_and_existing_empty_mount_directory(tmp_path):
     Image.new("RGB", (4, 4), "blue").save(asset)
     output = tmp_path / "out"
     output.mkdir()
+    original_directory = output.stat()
 
     result = run_cli(source, "--out", output, "--asset", f"plot.png={asset}")
 
     assert result.returncode == 0, result.stderr
+    assert output.stat().st_ino == original_directory.st_ino
     report, chunks, vectors = read_output(output)
     assert json.loads(result.stdout) == report
     assert report["source"]["path"] == str(source.resolve())
@@ -51,6 +55,27 @@ def test_cli_accepts_file_and_existing_empty_mount_directory(tmp_path):
         "assets",
     }
     assert source.read_text(encoding="utf-8") == original
+
+
+def test_failed_publication_clears_existing_output_directory(tmp_path, monkeypatch):
+    source = tmp_path / "input.txt"
+    source.write_text("Body.")
+    output = tmp_path / "out"
+    output.mkdir()
+    rename = Path.rename
+
+    def fail_report(path, target):
+        if target == output / "report.json":
+            assert (output / "content.md").is_file()
+            assert (output / "chunks.jsonl").is_file()
+            raise OSError("report publication failed")
+        return rename(path, target)
+
+    monkeypatch.setattr(Path, "rename", fail_report)
+    with pytest.raises(OSError, match="report publication failed"):
+        process_file(source, output)
+
+    assert list(output.iterdir()) == []
 
 
 def test_existing_outputs_are_not_overwritten(tmp_path):
