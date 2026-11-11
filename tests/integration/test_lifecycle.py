@@ -1,4 +1,3 @@
-import errno
 import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
@@ -9,9 +8,18 @@ from zipfile import ZipFile
 import httpx
 import pytest
 
-from doc_pipeline import Config, PipelineError, process_file
+from doc_pipeline import Config, PipelineError, pipeline, process_file
+from doc_pipeline.contracts.run import Issues, IssueTarget
 from doc_pipeline.services import io
-from tests.support import document_archive, pdf_bytes, read_output, write_source_pdf
+from tests.support import (
+    assert_document_output,
+    document_archive,
+    failure_issue,
+    pdf_bytes,
+    read_output,
+    read_report,
+    write_source_pdf,
+)
 
 
 class DocumentService:
@@ -118,12 +126,13 @@ def test_multimodal_citations_target_the_original_file_and_transfers_are_credent
 
     report, chunks, vectors = read_output(output)
     assert result == report
-    assert report["source"] == {
-        "path": str(source.resolve()),
-        "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
-    }
-    assert report["parse_status"] == "complete"
-    assert report["chunk_count"] == len(chunks) > 0
+    assert report["source"]["uri"] == source.resolve().as_uri()
+    assert report["source"]["sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert report["source"]["bytes"] == source.stat().st_size
+    assert report["source"]["document_version"] == "n/a"
+    assert report["run"]["state"] == "completed"
+    assert report["result"]["chunks"] == {"parsed": len(chunks), "partial": 0, "unparsed": 0}
+    assert chunks
     assert vectors == []
     assert "Pipeline probe section 1" in (output / "content.md").read_text()
     [parsed] = decoded
@@ -155,13 +164,14 @@ def test_multimodal_signed_download_rejects_unsafe_redirect(tmp_path, config):
             process_file(source_pdf, output, config, client=client)
 
     assert (error.value.stage, error.value.code) == ("parse", "unsafe_provider_url")
-    assert not (output / "report.json").exists()
+    assert set(output.iterdir()) == {output / "report.json"}
+    report = read_report(output)
+    assert report["run"]["state"] == "failed"
+    assert failure_issue(report, "acquire")["code"] == error.value.code
 
 
 def test_multimodal_render_failure_leaves_no_converted_pdf(tmp_path, config, monkeypatch):
     source_pdf = write_source_pdf(tmp_path)
-    from doc_pipeline import pipeline
-
     output = tmp_path / "out"
     provider = DocumentService(source_pdf, document_archive(pdf_bytes()))
 
@@ -176,7 +186,11 @@ def test_multimodal_render_failure_leaves_no_converted_pdf(tmp_path, config, mon
         with pytest.raises(PipelineError, match="test_render_failure"):
             process_file(source_pdf, output, config, client=client)
 
-    assert not output.exists()
+    assert set(output.iterdir()) == {output / "report.json"}
+    report = read_report(output)
+    assert report["run"]["state"] == "failed"
+    assert failure_issue(report, "render")["code"] == "test_render_failure"
+    assert report["stages"]["write"]["state"] == "not_reached"
 
 
 @pytest.mark.parametrize(
@@ -214,7 +228,10 @@ def test_multimodal_allocation_failure_does_not_repeat_allocation(
 
     assert (error.value.stage, error.value.code, error.value.retryable) == ("parse", code, retryable)
     assert calls == [("POST", "/api/v4/file-urls/batch")]
-    assert not (output / "report.json").exists()
+    assert set(output.iterdir()) == {output / "report.json"}
+    report = read_report(output)
+    assert report["run"]["state"] == "failed"
+    assert failure_issue(report, "acquire")["code"] == error.value.code
 
 
 @pytest.mark.parametrize("environment", [None, "", "document-token"])
@@ -229,7 +246,8 @@ def test_mineru_accepts_file_credentials_and_environment_override(tmp_path, monk
     provider = DocumentService(source_pdf, document_archive(pdf_bytes()))
     with httpx.Client(transport=httpx.MockTransport(provider.handle)) as client:
         report = process_file(source_pdf, tmp_path / "out", Config.from_toml(path), client=client)
-    assert report["parse_status"] == "complete"
+    assert report["run"]["state"] == "completed"
+    assert report["stages"]["parse"]["state"] == "succeeded"
     assert key not in str(report)
 
 
@@ -299,8 +317,12 @@ def test_fatal_embedding_failure_leaves_no_completed_output(tmp_path):
 
     with pytest.raises(OSError, match="before publication"):
         process_file(source, root, config, on_progress=fail_embedding)
-    assert not root.exists()
-    assert not list(tmp_path.glob(".doc-pipeline-*"))
+    assert set(root.iterdir()) == {root / "report.json"}
+    report = read_report(root)
+    assert report["run"]["state"] == "failed"
+    assert report["result"] == {"chunks": None, "locations": None, "embedding": None}
+    assert failure_issue(report, "embed")["code"] == "io_error"
+    assert report["stages"]["write"]["state"] == "not_reached"
 
 
 def test_concurrent_publishers_cannot_share_destination(tmp_path):
@@ -318,7 +340,8 @@ def test_concurrent_publishers_cannot_share_destination(tmp_path):
         first = pool.submit(process_file, path, root, on_progress=pause)
         try:
             assert entered.wait(5)
-            assert not (root / "report.json").exists()
+            assert read_report(root)["run"]["state"] == "running"
+            assert not (root / "content.md").exists()
             with pytest.raises(PipelineError, match="output_in_use"):
                 process_file(path, root)
         finally:
@@ -327,72 +350,57 @@ def test_concurrent_publishers_cannot_share_destination(tmp_path):
     assert read_output(root)[1][0]["body"] == "Body."
 
 
-@pytest.mark.parametrize("existing", [False, True], ids=["fresh-fallback", "existing-mount"])
+@pytest.mark.parametrize("existing", [False, True], ids=["fresh", "existing-mount"])
 @pytest.mark.parametrize("failure", [None, "move", "report"])
-def test_directory_install_preserves_inode_and_publishes_report_last(tmp_path, monkeypatch, existing, failure):
+def test_publication_preserves_inode_and_rolls_back_payload_on_failure(tmp_path, monkeypatch, existing, failure):
     source = tmp_path / "guide.md"
     source.write_text("Body.")
     output = tmp_path / "out"
     if existing:
         output.mkdir()
-    inode = []
-    original_rename, original_move = Path.rename, io.shutil.move
+    inode = output.stat().st_ino if existing else None
+    original_replace, original_move = Path.replace, io.shutil.move
+    payload = {"content.md", "chunks.jsonl", "embeddings.jsonl"}
+    moves = []
 
-    def rename(path, target):
-        if target == output:
-            assert not existing
-            inode.append(output.stat().st_ino)
-            raise OSError(errno.EBUSY, "mounted")
+    def replace(path, target):
         if target == output / "report.json":
-            assert {entry.name for entry in output.iterdir() if not entry.name.startswith(".")} == {
-                "content.md", "chunks.jsonl", "embeddings.jsonl",
-            }
-            if failure == "report":
-                raise OSError("injected report failure")
-        return original_rename(path, target)
+            if json.loads(path.read_text())["run"]["state"] == "completed":
+                assert read_report(output)["run"]["state"] == "running"
+                assert all((output / name).is_file() for name in payload)
+                if failure == "report":
+                    raise OSError("injected report failure")
+        return original_replace(path, target)
 
     def move(path, target):
-        assert not (output / "report.json").exists()
-        if failure == "move" and path.name == "chunks.jsonl":
+        nonlocal inode
+        if inode is None:
+            inode = output.stat().st_ino
+        assert read_report(output)["run"]["state"] == "running"
+        if failure == "move" and moves:
             raise OSError("injected move failure")
-        return original_move(path, target)
+        result = original_move(path, target)
+        moves.append(target)
+        return result
 
-    if existing:
-        inode.append(output.stat().st_ino)
-    monkeypatch.setattr(Path, "rename", rename)
+    monkeypatch.setattr(Path, "replace", replace)
     monkeypatch.setattr(io.shutil, "move", move)
     if failure:
         with pytest.raises(OSError, match=f"injected {failure} failure"):
             process_file(source, output)
-        assert list(output.iterdir()) == [] if existing else not output.exists()
+        assert moves
+        assert set(output.iterdir()) == {output / "report.json"}
+        report = read_report(output)
+        assert report["run"]["state"] == "failed"
+        assert failure_issue(report, "write")["code"] == "io_error"
+        assert report["result"]["chunks"] is None
     else:
         process_file(source, output)
-        assert output.stat().st_ino == inode[0]
-        assert read_output(output)[1][0]["body"] == "Body."
-    assert not list(tmp_path.glob(".doc-pipeline-*"))
-
-
-def test_fresh_directory_rename_publishes_all_outputs_as_last_operation(tmp_path, monkeypatch):
-    source = tmp_path / "guide.txt"
-    source.write_text("Body.")
-    output = tmp_path / "out"
-    original_rename = Path.rename
-    published = []
-
-    def rename(path, target):
-        if target == output:
-            assert list(output.iterdir()) == []
-            assert {entry.name for entry in path.iterdir()} == {
-                "content.md", "chunks.jsonl", "embeddings.jsonl", "report.json",
-            }
-            assert not path.samefile(output)
-            published.append(True)
-        return original_rename(path, target)
-
-    monkeypatch.setattr(Path, "rename", rename)
-    process_file(source, output)
-    assert published == [True]
-    assert read_output(output)[0]["chunk_count"] == 1
+        report, [chunk], _ = read_output(output)
+        assert report["run"]["state"] == "completed"
+        assert chunk["body"] == "Body."
+        assert {entry.name for entry in output.iterdir()} == payload | {"report.json"}
+    assert output.stat().st_ino == inode
     assert not list(tmp_path.glob(".doc-pipeline-*"))
 
 
@@ -411,10 +419,11 @@ def test_late_destination_collision_does_not_overwrite_user_files(tmp_path, exis
     with pytest.raises((OSError, PipelineError)):
         process_file(source, output, on_progress=collide)
     assert (output / "content.md").read_text() == "caller content"
-    assert list(output.iterdir()) == [output / "content.md"]
+    assert set(output.iterdir()) == {output / "content.md", output / "report.json"}
+    assert failure_issue(read_report(output), "write")["code"] == "output_not_empty"
 
 
-@pytest.mark.parametrize("name", [".report.json.tmp", "report.json", "content.md"])
+@pytest.mark.parametrize("name", ["report.json", "content.md"])
 def test_install_does_not_replace_late_caller_symlinks(tmp_path, name):
     source = tmp_path / "guide.txt"
     source.write_text("Body.")
@@ -424,35 +433,301 @@ def test_install_does_not_replace_late_caller_symlinks(tmp_path, name):
 
     def collide(event):
         if event.stage == "parse":
+            if name == "report.json":
+                (output / name).unlink()
             (output / name).symlink_to(caller)
 
     with pytest.raises((OSError, PipelineError)):
         process_file(source, output, on_progress=collide)
     assert (output / name).is_symlink()
     assert not caller.exists()
-    assert list(output.iterdir()) == [output / name]
+    assert set(output.iterdir()) == {output / name, output / "report.json"}
 
 
-@pytest.mark.parametrize("file", ["embeddings.jsonl", "report.json"])
 @pytest.mark.parametrize("existing", [False, True])
-def test_prepublication_write_failure_leaves_no_output(tmp_path, monkeypatch, file, existing):
-    from doc_pipeline import pipeline
-
+def test_payload_write_failure_leaves_only_failed_report(tmp_path, monkeypatch, existing):
     source = tmp_path / "guide.txt"
     source.write_text("Body.")
     output = tmp_path / "out"
     if existing:
         output.mkdir()
-    original = pipeline.write_jsonl if file.endswith("jsonl") else pipeline._write_record
+    original = pipeline.write_jsonl
 
     def fail(path, rows):
-        if path.name == file:
+        if path.name == "embeddings.jsonl":
             path.write_bytes(b"partial")
             raise OSError("injected write failure")
         return original(path, rows)
 
-    monkeypatch.setattr(pipeline, "write_jsonl" if file.endswith("jsonl") else "_write_record", fail)
+    monkeypatch.setattr(pipeline, "write_jsonl", fail)
     with pytest.raises(OSError, match="injected write failure"):
         process_file(source, output)
-    assert list(output.iterdir()) == [] if existing else not output.exists()
-    assert not list(tmp_path.glob(".doc-pipeline-*"))
+    assert set(output.iterdir()) == {output / "report.json"}
+    assert failure_issue(read_report(output), "write")["code"] == "io_error"
+
+
+def test_first_checkpoint_failure_leaves_existing_output_empty(tmp_path, monkeypatch):
+    source = tmp_path / "guide.txt"
+    source.write_text("Body.")
+    output = tmp_path / "out"
+    output.mkdir()
+
+    def fail(path, target):
+        assert target == output / "report.json"
+        raise OSError("injected checkpoint failure")
+
+    monkeypatch.setattr(Path, "replace", fail)
+    with pytest.raises(OSError, match="injected checkpoint failure"):
+        process_file(source, output)
+    assert not list(output.iterdir())
+
+
+def test_report_has_one_owner_for_each_fact_and_preserves_zero_vs_inapplicable(tmp_path):
+    source = tmp_path / "empty.txt"
+    source.write_text("")
+    output = tmp_path / "out"
+    report = process_file(source, output)
+    assert report == read_report(output)
+    assert set(report) == {"schema_version", "pipeline", "run", "source", "stages", "result", "issues"}
+    assert report["schema_version"] == 2
+    assert report["run"]["state"] == "completed"
+    assert report["result"] == {
+        "chunks": {"parsed": 0, "partial": 0, "unparsed": 0},
+        "locations": {"known": 0, "partial": 0, "unavailable": 0}, "embedding": "n/a",
+    }
+    assert report["source"]["bytes"] == 0
+    assert report["source"]["document_version"] == "n/a"
+    assert report["stages"]["acquire"] == {
+        "state": "not_applicable", "seconds": "n/a", "reason": "n/a", "service": "n/a",
+    }
+    assert report["stages"]["embed"] == {
+        "state": "skipped", "seconds": "n/a", "reason": "disabled", "profile": "n/a", "usage": "n/a",
+    }
+    assert set(report["stages"]) == {"intake", "acquire", "parse", "render", "chunk", "embed", "write"}
+    assert {path.name for path in output.iterdir()} == {"content.md", "chunks.jsonl", "embeddings.jsonl", "report.json"}
+    assert assert_document_output(output) == report
+
+
+def test_failure_after_capture_retains_identity_and_unpublished_results(tmp_path):
+    source = tmp_path / "bad.pdf"
+    source.write_text("This is not a PDF")
+    output = tmp_path / "out"
+    with pytest.raises(PipelineError, match="format_mismatch"):
+        process_file(source, output)
+    report = read_report(output)
+    assert report["run"]["state"] == "failed"
+    assert report["source"]["sha256"] is not None
+    assert report["source"]["bytes"] == source.stat().st_size
+    assert report["stages"]["intake"]["state"] == "failed"
+    assert report["stages"]["parse"]["state"] == "not_reached"
+    assert report["result"] == {"chunks": None, "locations": None, "embedding": "n/a"}
+    assert report["issues"][0]["code"] == "format_mismatch"
+    assert set(output.iterdir()) == {output / "report.json"}
+    assert assert_document_output(output) == report
+
+
+def test_grouping_preserves_occurrences_and_all_targets_without_internal_ids():
+    issues = Issues()
+    for number in range(45):
+        issues.add("parse", "opaque_source", "unknown_syntax", "retained_opaque",
+                   target=IssueTarget("chunk", (number,)))
+    issues.add("parse", "opaque_source", "unknown_syntax", "retained_opaque", target=IssueTarget("chunk", (4,)))
+    issues.add("parse", "opaque_source", "unknown_syntax", "retained_opaque", target=IssueTarget("block", ("empty",)))
+    [issue] = issues.snapshot()
+    assert issue["occurrences"] == 47
+    assert issue["targets"] == [{"unit": "chunk", "values": [[0, 44]]}]
+    assert issue["unlocated"] == 1
+    assert "empty" not in json.dumps(issue)
+    issues.block_targets["empty"] = IssueTarget("content_line", (52,))
+    [issue] = issues.snapshot()
+    assert issue["unlocated"] == 0
+    assert issue["targets"][-1] == {"unit": "content_line", "values": [[52, 52]]}
+
+
+def test_parse_issues_survive_a_later_render_failure(tmp_path, monkeypatch):
+    source = tmp_path / "unsupported.tex"
+    source.write_text(r"\unknowncommand{body}")
+    output = tmp_path / "out"
+
+    def fail(_):
+        raise PipelineError("render", "injected_render_failure")
+
+    monkeypatch.setattr(pipeline, "render_markdown", fail)
+    with pytest.raises(PipelineError, match="injected_render_failure"):
+        process_file(source, output)
+    report = read_report(output)
+    assert any(issue["code"] == "opaque_source" and issue["targets"] == [
+        {"unit": "source_line", "values": [[1, 1]]},
+    ] for issue in report["issues"])
+    assert report["issues"][-1]["stage"] == "render"
+    assert report["issues"][-1]["code"] == "injected_render_failure"
+
+
+def test_configured_embedding_with_no_inputs_records_known_zero_requests(tmp_path):
+    source = tmp_path / "empty.txt"
+    source.write_text("")
+    config = Config(embedding={"model": "test", "api_base_url": "https://embedding.test"})
+    report = process_file(source, tmp_path / "out", config)
+    stage = report["stages"]["embed"]
+    assert stage["state"] == "skipped"
+    assert stage["reason"] == "no_eligible_chunks"
+    assert stage["seconds"] == "n/a"
+    assert stage["usage"] == {"requests": 0, "responses": 0,
+                              "prompt_tokens": {"observed": 0, "reported_responses": 0},
+                              "total_tokens": {"observed": 0, "reported_responses": 0}}
+    assert report["result"]["embedding"] == {"succeeded": 0, "failed": 0, "ineligible": 0}
+
+
+def test_interruption_retains_attempt_counts_and_does_not_publish_payload(tmp_path):
+    source = tmp_path / "note.txt"
+    source.write_text("Body")
+    output = tmp_path / "out"
+    config = Config(embedding={"model": "test", "api_base_url": "https://embedding.test", "api_key": "key"})
+
+    def interrupt(request):
+        running = read_report(output)
+        assert running["run"]["state"] == "running"
+        assert running["stages"]["embed"]["state"] == "running"
+        assert running["result"]["chunks"] is None
+        raise KeyboardInterrupt
+
+    with httpx.Client(transport=httpx.MockTransport(interrupt)) as client:
+        with pytest.raises(KeyboardInterrupt):
+            process_file(source, output, config, client=client)
+    report = read_report(output)
+    assert report["run"]["state"] == "interrupted"
+    assert report["stages"]["embed"]["state"] == "interrupted"
+    assert report["stages"]["embed"]["usage"]["requests"] == 1
+    assert report["stages"]["embed"]["usage"]["responses"] == 0
+    assert report["stages"]["write"]["state"] == "not_reached"
+    assert set(output.iterdir()) == {output / "report.json"}
+    assert assert_document_output(output) == report
+
+
+def test_failed_final_checkpoint_rolls_back_payload_and_preserves_failure(tmp_path, monkeypatch):
+    source = tmp_path / "note.txt"
+    source.write_text("Body")
+    output = tmp_path / "out"
+    write = pipeline._write_record
+
+    def fail_completed(path, value):
+        if value["run"]["state"] == "completed":
+            assert (output / "content.md").is_file()
+            raise OSError("final report write rejected")
+        return write(path, value)
+
+    monkeypatch.setattr(pipeline, "_write_record", fail_completed)
+    with pytest.raises(OSError, match="final report write rejected"):
+        process_file(source, output)
+    report = read_report(output)
+    assert report["run"]["state"] == "failed"
+    assert report["stages"]["write"]["state"] == "failed"
+    assert report["result"]["chunks"] is None
+    assert set(output.iterdir()) == {output / "report.json"}
+
+
+def test_failed_publication_does_not_point_to_removed_chunks(tmp_path, monkeypatch):
+    source = tmp_path / "note.txt"
+    source.write_text("Body")
+    output = tmp_path / "out"
+    config = Config(embedding={"model": "test", "api_base_url": "https://embedding.test", "api_key": "key"})
+    write = pipeline.write_jsonl
+
+    def fail_vectors(path, rows):
+        if path.name == "embeddings.jsonl":
+            raise OSError("cannot write vectors")
+        write(path, rows)
+
+    monkeypatch.setattr(pipeline, "write_jsonl", fail_vectors)
+    with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(400))) as client:
+        with pytest.raises(OSError, match="cannot write vectors"):
+            process_file(source, output, config, client=client)
+    report = read_report(output)
+    [embedding_error] = [issue for issue in report["issues"] if issue["stage"] == "embed"]
+    assert embedding_error["targets"] == []
+    assert embedding_error["unlocated"] == embedding_error["occurrences"] == 1
+    assert set(output.iterdir()) == {output / "report.json"}
+
+
+def test_asset_targets_do_not_embed_inline_bytes_or_signed_credentials(tmp_path):
+    source = tmp_path / "images.md"
+    source.write_text("![picture](https://user:password@host.test/image.png?signature=secret#token)\n\n"
+                      "![inline](data:image/png;base64,DEADBEEF)")
+    report = process_file(source, tmp_path / "out")
+    text = json.dumps(report)
+    assert "password" not in text and "secret" not in text and "DEADBEEF" not in text
+    assert any(target == {"unit": "asset", "values": ["https://host.test/image.png"]}
+               for issue in report["issues"] for target in issue["targets"])
+
+
+def test_rst_error_reason_does_not_expose_option_credentials(tmp_path):
+    source = tmp_path / "bad.rst"
+    source.write_text(".. image:: picture.png\n   :width: https://example.test/file?signature=SECRET\n")
+    report = process_file(source, tmp_path / "out")
+    text = json.dumps(report)
+    assert "SECRET" not in text and "https://example.test" not in text
+    assert any(issue["code"] == "docutils_diagnostic" for issue in report["issues"])
+
+
+@pytest.mark.parametrize("reference", [
+    "/image.png?signature=SECRET", "image.png?access_token=SECRET",
+    "https%3A%2F%2Fhost.test%2Fimage%3Ftoken%3DSECRET",
+])
+def test_asset_target_removes_credentials_from_relative_and_encoded_uris(tmp_path, reference):
+    source = tmp_path / "image.md"
+    source.write_text(f"![image]({reference})")
+    report = process_file(source, tmp_path / "out")
+    assert "SECRET" not in json.dumps(report)
+
+
+def test_checkpoint_write_error_preserves_completed_parse_and_diagnostics(tmp_path, monkeypatch):
+    source = tmp_path / "bad.tex"
+    source.write_text(r"\unknowncommand{body}")
+    output = tmp_path / "out"
+    write = pipeline._write_record
+    injected = False
+
+    def fail_once(path, value):
+        nonlocal injected
+        if not injected and value["stages"]["parse"]["state"] == "succeeded":
+            injected = True
+            raise OSError("checkpoint write failed")
+        write(path, value)
+
+    monkeypatch.setattr(pipeline, "_write_record", fail_once)
+    with pytest.raises(OSError, match="checkpoint write failed"):
+        process_file(source, output)
+    report = read_report(output)
+    assert report["stages"]["intake"]["state"] == "succeeded"
+    assert report["stages"]["parse"]["state"] == "succeeded"
+    assert report["stages"]["write"]["state"] == "failed"
+    assert report["issues"][-1]["stage"] == "write"
+    assert any(issue["code"] == "opaque_source" for issue in report["issues"])
+
+
+def test_embedding_interruption_preserves_earlier_terminal_failures(tmp_path, monkeypatch):
+    from doc_pipeline.contracts.chunk import Chunk
+
+    source = tmp_path / "note.txt"
+    source.write_text("Body")
+    output = tmp_path / "out"
+    chunks = [Chunk(id=i, body=str(i), heading_path=[], embedding_input=str(i), citations=[]) for i in range(11)]
+    monkeypatch.setattr(pipeline, "make_chunks", lambda *_: chunks)
+    config = Config(embedding={"model": "test", "api_base_url": "https://embedding.test", "api_key": "key"})
+    calls = 0
+
+    def handle(request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(401)
+        raise KeyboardInterrupt
+
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        with pytest.raises(KeyboardInterrupt):
+            process_file(source, output, config, client=client)
+    report = read_report(output)
+    [failure] = [issue for issue in report["issues"] if issue["code"] == "authentication_failed"]
+    assert failure["occurrences"] == failure["unlocated"] == 10
+    assert report["stages"]["embed"]["usage"]["requests"] == 2
+    assert report["stages"]["embed"]["usage"]["responses"] == 1

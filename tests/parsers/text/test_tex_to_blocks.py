@@ -2,7 +2,7 @@
 from bs4 import BeautifulSoup
 from markdown_it import MarkdownIt
 
-from doc_pipeline.contracts.document import Code, Equation, Heading, Opaque, Text
+from doc_pipeline.contracts.document import Code, Diagnostic, Equation, Heading, Opaque, Text
 from doc_pipeline.parsed_content.md_renderer import render_markdown
 from tests.parsers.text.support import assert_provenance, parse
 
@@ -140,7 +140,11 @@ def test_tex_malformed_listing_keeps_whole_document_opaque(tmp_path):
     parsed_content = parse(tmp_path, "broken.tex", original)
     [block] = parsed_content.blocks
     assert isinstance(block.payload, Opaque)
-    assert any("entire source retained" in item for item in parsed_content.diagnostics)
+    assert block.payload.source_text == original
+    assert parsed_content.diagnostics == [Diagnostic(
+        code="tex_parse_failed", action="retained_opaque", reason=r"unterminated \lstinline argument",
+        source_line=2,
+    )]
 
 
 def test_tex_malformed_suffix_after_document_is_opaque(tmp_path):
@@ -154,7 +158,10 @@ def test_tex_malformed_suffix_after_document_is_opaque(tmp_path):
     [tail] = [block for block in parsed_content.blocks if isinstance(block.payload, Opaque)]
     assert tail.payload.source_text == "\\end\n\nIgnored tail.\n"
     assert tail.locations[0].codepoints.start == len(body)
-    assert any("trailing source retained" in item for item in parsed_content.diagnostics)
+    assert parsed_content.diagnostics == [Diagnostic(
+        code="tex_trailing_parse_failed", action="retained_opaque",
+        reason=r"Bad \end macro: expected {environmentname}", source_line=6,
+    )]
     assert_provenance(parsed_content, original)
 
     unterminated = parse(tmp_path, "unterminated.tex", "\\begin{document}\nText \\end\n")

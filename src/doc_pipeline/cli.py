@@ -3,6 +3,7 @@ import json
 import logging
 import signal
 import sys
+from collections import Counter
 from contextlib import nullcontext
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -29,12 +30,20 @@ _STATUS_LABELS = {
     "failed": "Processing failed",
 }
 _DIAGNOSTICS = {
-    "mineru_source_locations_unresolved": "Some content could not be located in the source document.",
-    "mineru_source_location_unresolved": "Some content could not be located in the source document.",
+    "source_location_unresolved": "Some content could not be located in the source document.",
     "mineru_empty_block": "MinerU returned empty content blocks.",
     "mineru_heading_levels_inferred_from_numbering": "Heading levels were inferred from section numbering.",
 }
 _UPDATE_INTERVAL = 10
+
+
+def _document_status(report: dict) -> str:
+    if report["run"]["state"] != "completed":
+        return "failed"
+    chunks, embedding = report["result"]["chunks"], report["result"]["embedding"]
+    if chunks["partial"] or chunks["unparsed"] or isinstance(embedding, dict) and embedding["failed"]:
+        return "partial"
+    return "complete"
 
 
 def _duration(seconds: float) -> str:
@@ -86,33 +95,85 @@ class TerminalProgress:
             self.active[event.index] = (event, now)
 
 
-def print_summary(report: dict, output_dir: Path) -> None:
-    batch = "files" in report
-    execution = report if batch else report["execution"]
-    print(f"{_STATUS_LABELS[execution['status']]} in {_duration(execution['elapsed_seconds'])}.")
+def _batch_documents(report: dict, output_dir: Path) -> list[dict | None]:
+    return [
+        json.loads((output_dir / item["report"]).read_text(encoding="utf-8")) if item["report"] else None
+        for item in report["files"]
+    ]
+
+
+def _embedding_failed(report: dict) -> bool:
+    embedding = report["result"]["embedding"]
+    return isinstance(embedding, dict) and embedding["failed"] > 0
+
+
+def _batch_exit_code(report: dict, documents: list[dict | None]) -> int:
+    code = 0
+    for item, document in zip(report["files"], documents, strict=True):
+        if document is None:
+            retryable = item["unreported"]["retryable"]
+        elif document["run"]["state"] == "completed":
+            if _embedding_failed(document):
+                code = 75
+            continue
+        else:
+            fatal = next(
+                (issue for issue in document["issues"]
+                 if issue["action"] == "failed" and issue["targets"] == [{"unit": "document", "values": "n/a"}]),
+                None,
+            )
+            retryable = fatal["retryable"] if fatal else None
+        if retryable is not True:
+            return 65
+        code = 75
+    return code
+
+
+def print_summary(report: dict, output_dir: Path, documents: list[dict | None] | None = None) -> None:
+    batch = documents is not None
+    if batch:
+        counts = Counter(_document_status(document) if document is not None else "failed" for document in documents)
+        status = "failed" if counts["failed"] == len(documents) else (
+            "partial" if counts["failed"] or counts["partial"] else "complete"
+        )
+        results = [
+            document["result"] for document in documents
+            if document is not None and document["run"]["state"] == "completed"
+        ]
+    else:
+        status = _document_status(report)
+        results = [report["result"]]
+
+    print(f"{_STATUS_LABELS[status]} in {_duration(report['run']['elapsed_seconds'])}.")
     if batch:
         print(
-            f"Files: {report['complete_file_count']} complete, {report['partial_file_count']} partial, "
-            f"{report['failed_file_count']} failed."
+            f"Files: {counts['complete']} complete, {counts['partial']} partial, "
+            f"{counts['failed']} failed."
         )
-    elif report["parse_status"] == "partial":
-        print("Document parsing was partial. Review the report before using the output.")
-    print(f"Chunks: {report['chunk_count']}.")
-    if batch or report["embedding"] is not None:
-        print(f"Embeddings: {report['embedding_count']} generated, {execution['embedding_error_count']} failed.")
+    else:
+        chunks = report["result"]["chunks"]
+        if chunks["partial"] or chunks["unparsed"]:
+            print("Document parsing was partial. Review the report before using the output.")
+    chunks = sum(sum(result["chunks"].values()) for result in results)
+    print(f"Chunks: {chunks}.")
+    embeddings = [result["embedding"] for result in results if isinstance(result["embedding"], dict)]
+    if batch or embeddings:
+        generated = sum(result["succeeded"] for result in embeddings)
+        failed = sum(result["failed"] for result in embeddings)
+        print(f"Embeddings: {generated} generated, {failed} failed.")
     if batch:
         print(f"Run report: {output_dir / 'run.json'}")
         return
 
-    stages = execution["stage_seconds"]
+    stages = report["stages"]
     remote_times = [
-        f"{label} {_duration(stages[stage])}"
-        for stage, label in (("remote_acquisition", "MinerU"), ("embedding", "embeddings"))
-        if stage in stages
+        f"{label} {_duration(stages[stage]['seconds'])}"
+        for stage, label in (("acquire", "MinerU"), ("embed", "embeddings"))
+        if isinstance(stages[stage]["seconds"], (int, float))
     ]
     if remote_times:
         print(f"Time spent: {', '.join(remote_times)}.")
-    notes = {_DIAGNOSTICS.get(item.split(' ', 1)[0]) for item in report["diagnostics"]}
+    notes = {_DIAGNOSTICS.get(issue["code"]) for issue in report["issues"]}
     for note in sorted(notes - {None}):
         print(note)
     if None in notes:
@@ -175,17 +236,15 @@ def main(argv=None) -> int:
             if len(args.input) == 1:
                 report = process_file(args.input[0], args.out, config, assets=dict(args.asset), encoding=args.encoding,
                                       on_progress=progress)
-                code = 75 if report["embedding_errors"] else 0
+                documents = None
+                code = 75 if _embedding_failed(report) else 0
             else:
                 report = process_files([InputFile(path=path, encoding=args.encoding) for path in args.input],
                                        args.out, config, on_progress=progress)
-                errors = [item["error"] for item in report["files"] if "error" in item]
-                if any(not error["retryable"] for error in errors):
-                    code = 65
-                else:
-                    code = 75 if errors or report["embedding_error_count"] else 0
+                documents = _batch_documents(report, args.out)
+                code = _batch_exit_code(report, documents)
         if text_output:
-            print_summary(report, args.out)
+            print_summary(report, args.out, documents)
         else:
             print(json.dumps(report, ensure_ascii=False), flush=True)
         return code

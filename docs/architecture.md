@@ -26,14 +26,14 @@ flowchart TD
 	EMBED --> VECTORS["Stage embeddings.jsonl"]
 	FILES --> PUBLISH["Publish completed document output"]
 	VECTORS --> PUBLISH
-	PIPE -. execution records .-> REPORT["Stage report.json"]
-	REPORT --> PUBLISH
-	PUBLISH --> BATCH["run.json for batches"]
+	PIPE -. checkpoints .-> REPORT["report.json"]
+	PUBLISH -->|completed checkpoint| REPORT
+	REPORT --> BATCH["run.json references document reports"]
 ```
 
 Text formats are parsed locally. PDF, Office, and image files are uploaded to MinerU. Both paths produce `ParsedContent`, so rendering and chunking do not depend on the input format or the provider's response schema.
 
-The coordinator captures inputs temporarily, records execution, and publishes the completed document output. Blocks, detailed selections, and provider archives are processing inputs, not persistent outputs. `embeddings.jsonl` is created even when embedding is disabled, in which case it is empty.
+The coordinator captures inputs temporarily, records execution, and publishes the completed document output. Blocks, detailed selections, and provider archives stay in the processing workspace. `embeddings.jsonl` is created even when embedding is disabled, in which case it is empty.
 
 ## Structured blocks preserve meaning and evidence
 
@@ -47,7 +47,7 @@ This shared model separates three representations with different purposes.
 
 The renderer returns both Markdown and `MarkdownMapping` records. The chunker uses those mappings and block selections to connect each chunk to the rendered document and the original source. It does not parse the Markdown again to recover citations.
 
-Unsupported content becomes `Opaque` where the parser can preserve it. That makes `parse_status` partial. Nonempty opaque content remains in the output, but its chunk has no embedding input. A diagnostic or an unresolved citation alone does not make parsing partial.
+Unsupported content becomes `Opaque` where the parser can preserve it. Nonempty opaque content remains in the output and produces chunks without embedding input. The report records content interpretation and source location coverage in separate distributions.
 
 ## Chunking follows document structure
 
@@ -69,11 +69,13 @@ Parsing completeness and citation precision therefore answer different questions
 
 [`pipeline.py`](../src/doc_pipeline/pipeline.py) validates inputs, selects parsers, renders content, builds chunks, writes outputs, and optionally requests embeddings. It records per-stage timings and counts throughout that work.
 
+[`contracts/observations.py`](../src/doc_pipeline/contracts/observations.py) defines shared service observations, request counts, and embedding token usage. [`contracts/run.py`](../src/doc_pipeline/contracts/run.py) owns execution states, stage timing, grouped issues, and report snapshots. The pipeline maps parser diagnostics to output locations and derives result counts from the published payloads. The CLI derives its display status and exit code from the report.
+
 For batches, local documents run in a thread pool controlled by `local_workers`. Remote documents are submitted in groups controlled by `mineru.batch_size`. Local work can overlap remote acquisition. The final `run.json` preserves input order regardless of completion order.
 
-Caught failures belong to individual files, so one failed document does not stop the remaining batch. Embedding failures are recorded per chunk and leave parsed content available. A successful embedding response with missing vectors or repeated input indices triggers one resend of the same batch. If that resend fails, processing continues with the next batch. The Python single-file API raises fatal processing errors. The batch API records caught file errors in `run.json`.
+Caught failures belong to individual files, so one failed document does not stop the remaining batch. Embedding issues identify affected chunks and leave parsed content available. A successful embedding response with missing vectors or repeated input indices triggers one resend of the same batch. If that resend fails, processing continues with the next batch. The Python single-file API raises fatal processing errors. The batch API records caught file errors in each document report. If a report is unavailable, the corresponding `run.json` entry carries the failure.
 
-Each run requires an empty or nonexistent output directory. The pipeline prepares all per-document files in private staging before publication. It preserves existing output directories and installs `report.json` last. Expected embedding errors are included in the report with usable content and successful vectors. Fatal pre-publication errors discard that document's staging. An interrupted batch can finish without its final `run.json`.
+Each run requires an empty or nonexistent output directory. After locking the directory, the pipeline writes report checkpoints and prepares document files in private staging. It installs the document files before changing `report.json` to `completed`. Caught failures discard the staged files and update the report. If installation has started, the pipeline rolls back the files it installed. The batch also checkpoints `run.json` and marks it `interrupted` on a caught interruption.
 
 ## Where responsibilities live
 

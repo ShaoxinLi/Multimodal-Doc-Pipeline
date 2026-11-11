@@ -8,6 +8,7 @@ import pytest
 from PIL import Image
 
 from doc_pipeline.contracts.core import FileRef, InputFile
+from doc_pipeline.contracts.document import Diagnostic
 from doc_pipeline.parsers.text.parser import parse_text_document
 from doc_pipeline.pipeline import process_file
 from tests.parsers.text.support import parse
@@ -39,8 +40,8 @@ def test_relocated_document_loads_adjacent_image_without_mapping(tmp_path, monke
     archived = f'assets/{sha256(data).hexdigest()}.png'
     assert (output / archived).read_bytes() == data
     assert archived in (output / 'content.md').read_text()
-    assert result['chunk_count'] > 0
-    assert not any('snapshot' in d or 'blocked_reference' in d for d in result['diagnostics'])
+    assert sum(result['result']['chunks'].values()) > 0
+    assert not any(issue['action'] == 'unarchived' for issue in result['issues'])
 
 
 def test_local_reference_decodes_path_and_ignores_query_and_fragment(tmp_path):
@@ -53,7 +54,8 @@ def test_local_reference_decodes_path_and_ignores_query_and_fragment(tmp_path):
 def test_absent_local_image_is_missing_not_invalid(tmp_path):
     parsed = parse(tmp_path, 'guide.md', 'A plot: ![plot](absent.png)')
     assert parsed.inline_assets[0].resolution == 'missing_snapshot'
-    assert parsed.diagnostics == ['missing_snapshot: absent.png']
+    assert parsed.inline_assets[0].original_reference == 'absent.png'
+    assert parsed.diagnostics == []
 
 
 @pytest.mark.parametrize('valid_override', [True, False])
@@ -73,6 +75,9 @@ def test_explicit_mapping_is_authoritative(tmp_path, valid_override):
         assert asset.asset.sha256 == sha256(override.read_bytes()).hexdigest()
     else:
         assert asset.asset is None
+        assert parsed.diagnostics == [
+            Diagnostic(code='invalid_image_snapshot', action='unarchived', asset='plot.png'),
+        ]
 
 
 @pytest.mark.parametrize('reference', ['../outside.png', '%2e%2e/outside.png', '/outside.png',
@@ -125,7 +130,8 @@ def test_local_image_byte_limit(tmp_path, excess):
     parsed = parse_text_document(InputFile(path=source), FileRef(path=str(source), sha256='0' * 64),
                                  tmp_path / 'out', max_asset_bytes=size - excess)
     assert parsed.inline_assets[0].resolution == ('missing_snapshot' if excess else 'archived')
-    assert ('asset_too_large: plot.png' in parsed.diagnostics) == bool(excess)
+    expected = [Diagnostic(code='asset_too_large', action='unarchived', asset='plot.png')] if excess else []
+    assert parsed.diagnostics == expected
 
 
 def test_automatic_images_do_not_read_output_subtree(tmp_path):

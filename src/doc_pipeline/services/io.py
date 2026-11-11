@@ -1,22 +1,23 @@
-import errno
 import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 import time
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from contextvars import ContextVar
 from fcntl import LOCK_EX, LOCK_NB, flock
 from pathlib import Path
-from stat import S_IMODE, S_ISREG
+from stat import S_ISREG
 from urllib.parse import urlsplit
 
 import httpx
 
 from doc_pipeline.contracts.core import PipelineError
+from doc_pipeline.contracts.observations import RequestCounts, ServiceIssueCallback
 
 
 def json_bytes(value) -> bytes:
@@ -34,20 +35,45 @@ def write_bytes(path: Path, data: bytes) -> None:
     path.write_bytes(data)
 
 
-def write_json(path: Path, value) -> None:
-    write_bytes(path, json_bytes(value))
-
-
 def write_jsonl(path: Path, rows) -> None:
     with path.open("wb") as stream:
         for row in rows:
             stream.write(json_bytes(row))
 
 
-def status_error(response: httpx.Response, stage: str) -> PipelineError:
+def provider_reason(value, *, secrets: tuple[str, ...] = ()) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    reason = value.splitlines()[0]
+    for secret in secrets:
+        if secret:
+            reason = reason.replace(secret, "[redacted]")
+    reason = re.sub(r"(?i)\b(?:[a-z][a-z0-9+.-]*://|www\.)[^\s<>\"']+", "[redacted]", reason)
+    reason = re.sub(r"(?i)\b(?:bearer|basic)\s+[^\s,;]+", "[redacted]", reason)
+    reason = re.sub(
+        r'''(?ix)\b(?:authorization|api[-_ ]?key|access[-_ ]?token|token|password|signature)\b["']?
+            \s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)''',
+        "[redacted]", reason,
+    )
+    reason = " ".join(reason.split())
+    return reason[:512] or None
+
+
+def status_error(response: httpx.Response, stage: str, *, secrets: tuple[str, ...] = ()) -> PipelineError:
     status = response.status_code
     code = "authentication_failed" if status in {401, 403} else f"http_{status}"
-    return PipelineError(stage, code, status in {408, 429} or status >= 500)
+    reason = None
+    try:
+        value = response.json()
+    except (ValueError, RecursionError, httpx.ResponseNotRead):
+        pass
+    else:
+        if isinstance(value, dict):
+            detail = value.get("err_msg", value.get("msg"))
+            if detail is None and isinstance(value.get("error"), dict):
+                detail = value["error"].get("message")
+            reason = provider_reason(detail, secrets=secrets)
+    return PipelineError(stage, code, status in {408, 429} or status >= 500, reason=reason)
 
 
 _http_logging_suppressed = ContextVar("http_logging_suppressed", default=False)
@@ -77,24 +103,40 @@ RETRY_DELAY_SECONDS = 1
 
 def request_json(client: httpx.Client, stage: str, method: str, url: str,
                  *, timeout: float, deadline: float | None = None, retry_transport: bool = True,
-                 retry_response_once: Callable[[dict], bool] | None = None,
+                 retry_response_once: Callable[[dict], PipelineError | None] | None = None,
+                 requests: RequestCounts | None = None,
+                 on_response: Callable[[dict], None] | None = None,
+                 on_issue: ServiceIssueCallback | None = None,
                  **kwargs):
     response_retried = False
+    retry_issue = None
     for attempt in range(RETRY_ATTEMPTS + int(retry_response_once is not None)):
         try:
             with suppress_http_logging():
-                response = client.request(method, url, auth=None, follow_redirects=False,
-                                          timeout=bounded_timeout(timeout, deadline), **kwargs)
-            if not response.is_success:
-                raise status_error(response, stage)
+                request = client.build_request(method, url, timeout=bounded_timeout(timeout, deadline), **kwargs)
+                if retry_issue is not None and on_issue is not None:
+                    on_issue(retry_issue.code, retry_issue.reason, "retried", retry_issue.retryable)
+                if requests is not None:
+                    requests.requests += 1
+                with closing(client.send(request, auth=None, follow_redirects=False, stream=True)) as response:
+                    if requests is not None:
+                        requests.responses += 1
+                    response.read()
             try:
                 value = response.json()
             except (ValueError, RecursionError):
-                raise PipelineError(stage, "invalid_provider_response") from None
+                value = None
+            if isinstance(value, dict) and on_response is not None:
+                on_response(value)
+            if not response.is_success:
+                authorization = request.headers.get("Authorization", "")
+                raise status_error(response, stage, secrets=(authorization, authorization.removeprefix("Bearer ")))
             if not isinstance(value, dict):
                 raise PipelineError(stage, "invalid_provider_response")
-            if retry_response_once is not None and retry_response_once(value) and not response_retried:
+            retry = retry_response_once(value) if retry_response_once is not None else None
+            if retry is not None and not response_retried:
                 response_retried = True
+                retry_issue = retry
                 continue
             return value
         except httpx.TransportError:
@@ -107,6 +149,7 @@ def request_json(client: httpx.Client, stage: str, method: str, url: str,
             error = exc
         if not error.retryable or response_retried or attempt + 1 == RETRY_ATTEMPTS:
             raise error
+        retry_issue = error
         time.sleep(bounded_timeout(RETRY_DELAY_SECONDS * 2 ** attempt, deadline))
 
 
@@ -193,39 +236,20 @@ def capture_file(path: Path, target: Path, limit: int, error_code: str) -> str:
     return checksum.hexdigest()
 
 
-def install_output(staging: Path, destination: Path, *, preserve_directory: bool) -> None:
-    if not preserve_directory:
-        mode = S_IMODE(destination.stat().st_mode)
-        staging.chmod(mode)
-        try:
-            staging.rename(destination)
-        except OSError as error:
-            if error.errno not in {errno.EBUSY, errno.EXDEV}:
-                raise
-        else:
-            return
+@contextmanager
+def install_output(staging: Path, destination: Path):
     installed = []
     try:
         for path in staging.iterdir():
-            if path.name == "report.json":
-                continue
             target = destination / path.name
             if target.exists() or target.is_symlink():
                 raise PipelineError("write", "output_not_empty")
             installed.append(target)
             shutil.move(path, target)
-        report = destination / "report.json"
-        if report.exists() or report.is_symlink():
-            raise PipelineError("write", "output_not_empty")
-        temporary = destination / ".report.json.tmp"
-        with temporary.open("xb") as stream:
-            installed.append(temporary)
-            stream.write((staging / "report.json").read_bytes())
-        installed.append(report)
-        temporary.rename(report)
+        yield
     except BaseException:
         for target in reversed(installed):
-            if target.is_dir():
+            if target.is_dir() and not target.is_symlink():
                 shutil.rmtree(target)
             else:
                 target.unlink(missing_ok=True)

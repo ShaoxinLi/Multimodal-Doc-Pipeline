@@ -105,10 +105,6 @@ def test_decimal_subsections_retain_their_explicit_parent_path():
 
 @pytest.mark.parametrize("suffix", ["ppt", "pptx", "PPTX", "pdf", "docx", "png"])
 def test_only_slide_sources_receive_semantic_group_scopes(tmp_path, suffix):
-    from doc_pipeline.contracts.config import Limits
-    from doc_pipeline.contracts.core import FileRef
-    from doc_pipeline.parsers.multimodal.parser import decode_archive
-
     def paragraph(value):
         return {"type": "paragraph", "content": {"paragraph_content": [{"type": "text", "content": value}]}}
 
@@ -119,10 +115,6 @@ def test_only_slide_sources_receive_semantic_group_scopes(tmp_path, suffix):
 
 
 def test_validated_slide_type_survives_a_resolved_source_without_an_extension(tmp_path):
-    from doc_pipeline.contracts.config import Limits
-    from doc_pipeline.contracts.core import FileRef
-    from doc_pipeline.parsers.multimodal.parser import decode_archive
-
     node = {"type": "paragraph", "content": {"paragraph_content": [{"type": "text", "content": "Slide"}]}}
     archive = _content_archive(tmp_path / "result.zip", [[node], [node]])
     parsed = decode_archive(FileRef(path="resolved/bytes", sha256="0" * 64), archive, tmp_path / "bundle",

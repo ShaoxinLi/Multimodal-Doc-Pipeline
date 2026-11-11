@@ -11,7 +11,7 @@ from urllib.parse import unquote, urlsplit
 from PIL import Image as RasterImage
 
 from doc_pipeline.contracts.core import FileRef
-from doc_pipeline.contracts.document import AssetResolution, Image, TextAsset
+from doc_pipeline.contracts.document import AssetResolution, Diagnostic, Image, TextAsset
 from doc_pipeline.services.io import write_bytes
 
 _RASTER_EXTENSIONS = {
@@ -50,15 +50,12 @@ class AssetResolver:
         self.source_dir = source_dir.resolve()
         self.output_root = (output_root or output_dir).resolve()
         self.max_asset_bytes = max_asset_bytes
-        self.diagnostics: list[str] = []
+        self.diagnostics: list[Diagnostic] = []
         self._resolved: dict[str, tuple[AssetResolution, FileRef | None]] = {}
 
     def __call__(self, reference: str, alt: str) -> TextAsset:
         if reference not in self._resolved:
             self._resolved[reference] = self._resolve(reference)
-            status, _ = self._resolved[reference]
-            if status != "archived":
-                self.diagnostics.append(f"{status}: {reference}")
         status, file = self._resolved[reference]
         return TextAsset(reference, alt, status, file)
 
@@ -107,20 +104,20 @@ class AssetResolver:
                 if not S_ISREG(info.st_mode):
                     return "blocked_reference", None
                 if info.st_size > self.max_asset_bytes:
-                    self.diagnostics.append(f"asset_too_large: {reference}")
+                    self.diagnostics.append(Diagnostic(code="asset_too_large", action="unarchived", asset=reference))
                     return missing, None
                 with os.fdopen(descriptor, "rb", closefd=False) as stream:
                     data = stream.read(self.max_asset_bytes + 1)
             finally:
                 os.close(descriptor)
             if len(data) > self.max_asset_bytes:
-                self.diagnostics.append(f"asset_too_large: {reference}")
+                self.diagnostics.append(Diagnostic(code="asset_too_large", action="unarchived", asset=reference))
                 return missing, None
             with RasterImage.open(BytesIO(data), formats=list(_RASTER_EXTENSIONS)) as raster:
                 extension = _RASTER_EXTENSIONS[raster.format]
                 raster.verify()
         except (OSError, ValueError, RuntimeError, RasterImage.DecompressionBombError):
-            self.diagnostics.append(f"invalid_image_snapshot: {reference}")
+            self.diagnostics.append(Diagnostic(code="invalid_image_snapshot", action="unarchived", asset=reference))
             return missing, None
         digest = sha256(data).hexdigest()
         target = self.output_dir / "assets" / f"{digest}.{extension}"

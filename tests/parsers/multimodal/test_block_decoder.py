@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from doc_pipeline.contracts.document import Diagnostic
 from doc_pipeline.parsed_content.md_renderer import render_markdown
 from doc_pipeline.parsed_content.selection import canonical_text
 from tests.parsers.multimodal.support import (
@@ -114,7 +115,7 @@ def test_preserves_unknown_block_and_empty_paragraph_without_locations(tmp_path)
     assert canonical_text(empty) == ""
     assert empty.locations == []
     assert empty.location_precision == "unresolved"
-    assert f"mineru_empty_block {empty.id}" in parsed_content.diagnostics
+    assert Diagnostic(code="mineru_empty_block", action="omitted", block_id=empty.id) in parsed_content.diagnostics
 
 
 def test_decodes_merged_tables_chart_code_formula_and_referenced_images(tmp_path):
@@ -231,11 +232,12 @@ def test_missing_and_blocked_assets_are_diagnosed_without_failing_text_parse(tmp
     assert parsed_content.parse_status == "complete"
     assert image.payload.asset is None
     assert image.payload.captions == ["Retain the caption"]
-    assert f"mineru_asset_blocked_reference {image.id}" in parsed_content.diagnostics
-    assert f"mineru_asset_blocked_reference {active.id}" in parsed_content.diagnostics
-    assert f"mineru_asset_missing_snapshot {table.id}" in parsed_content.diagnostics
-    assert parsed_content.inline_assets[0].resolution == "missing_snapshot"
-    assert parsed_content.inline_assets[0].table_cell == (0, 0)
+    assert image.payload.resolution == "blocked_reference"
+    assert active.payload.resolution == "blocked_reference"
+    [inline_asset] = parsed_content.inline_assets
+    assert inline_asset.resolution == "missing_snapshot"
+    assert inline_asset.owner_block_id == table.id
+    assert inline_asset.table_cell == (0, 0)
     assert table.payload.html == "<table><tr><td>Diagram</td></tr></table>"
     assert not (bundle / "assets").exists()
 

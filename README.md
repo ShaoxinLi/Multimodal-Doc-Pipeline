@@ -23,7 +23,7 @@ uv run doc-pipeline path/to/document --out path/to/output
 
 For a first run without credentials, use a [supported text format](#supported-formats). To process a PDF, Office file, or image, [set your MinerU key](#configure-mineru) first.
 
-The command prints a JSON report and writes Markdown, chunks, embeddings, a run report, and referenced media. Embeddings are disabled by default, so `embeddings.jsonl` is empty.
+The command prints a JSON report and writes Markdown, chunks, embeddings, `report.json`, and referenced media. Embeddings are disabled by default, so `embeddings.jsonl` is empty.
 
 Inspect the result:
 
@@ -32,7 +32,7 @@ cat path/to/output/content.md
 cat path/to/output/report.json
 ```
 
-Check `parse_status` and `embedding_errors`. Exit code `0` can still mean partial parsing.
+Check `result.chunks`, `result.embedding`, and `issues`. Exit code `0` can still mean partial parsing.
 
 ## Get the Docker image
 
@@ -177,7 +177,7 @@ uv run doc-pipeline path/to/document path/to/another-document \
 	--out path/to/batch-output
 ```
 
-Results go into numbered directories such as `0001/` and `0002/`. The root `run.json` records each file's result. A file failure does not prevent other files from producing results.
+Results go into numbered directories such as `0001/` and `0002/`. The root `run.json` points to each document's report. The batch continues processing other files after an individual file fails.
 
 ## Use the Python API
 
@@ -188,7 +188,7 @@ from pathlib import Path
 from doc_pipeline import process_file
 
 report = process_file(Path("path/to/document"), Path("path/to/output"))
-print(report["parse_status"])
+print(report["result"]["chunks"])
 ```
 
 For a batch with explicit configuration:
@@ -203,7 +203,7 @@ report = process_files(
 	Path("path/to/batch-output"),
 	config,
 )
-print(report["status"])
+print(report["run"]["state"])
 ```
 
 `process_file` accepts the same `config` object as its third argument.
@@ -225,11 +225,11 @@ report = process_file(
 | `content.md` | Parsed document in Markdown |
 | `chunks.jsonl` | Chunks with section context, metadata, and source citations |
 | `embeddings.jsonl` | Successful embedding vectors, empty when embeddings are disabled |
-| `report.json` | Parse status, counts, diagnostics, embedding errors, and timings |
+| `report.json` | Source, lifecycle, stage timings, result counts, and grouped issues |
 | `assets/` | Asset snapshots, when present |
-| `run.json` | Per-file results and report paths for batch runs |
+| `run.json` | Batch timing, shared MinerU request counts, and document report paths |
 
-Read `citations.content_ranges` against `content.md` for surrounding context. Media paths in each chunk resolve relative to its output directory. [Output format](docs/output-format.md)
+Read the document files once `report.json` has `run.state = "completed"`. Read `citations.content_ranges` against `content.md` for surrounding context. Media paths in each chunk resolve relative to its output directory. [Output format](docs/output-format.md)
 
 ### Check a failed or partial run
 
@@ -237,8 +237,8 @@ Read `citations.content_ranges` against `content.md` for surrounding context. Me
 | --- | --- |
 | `output_not_empty` | Choose a new or empty directory, including when retrying. |
 | `missing_mineru_credentials` | Export `MINERU_API_KEY`. In Docker, pass it with `-e` or `--env-file`. |
-| No embeddings appear | Check the `[embedding]` settings and `embedding_errors` in `report.json`. |
-| Parsing is partial | Read `diagnostics` and inspect `content.md` before using the chunks. |
+| No embeddings appear | Check `stages.embed`, `result.embedding`, and issues with stage `embed` in `report.json`. |
+| Parsing is partial | Check `result.chunks` and issues with stage `parse`. Inspect the referenced content before using the chunks. |
 
 Exit codes are `0` for completed processing, `2` for invalid CLI arguments, `65` for a non-retryable failure, `75` for a retryable failure or any embedding error, and `130` for interruption. See [failure semantics](docs/output-format.md#status-and-failure-semantics) for details.
 
@@ -253,6 +253,8 @@ uv run ruff check src tests
 ```
 
 Tests do not call live paid services. Source code is in [src/doc_pipeline](src/doc_pipeline), with tests in [tests](tests).
+
+Contract tests follow their production modules. Integration tests cover service calls and document lifecycles. Shared assertions in [tests/support.py](tests/support.py) check report fields, result counts against the delivered files, issue targets, and batch references.
 
 ## Documentation
 

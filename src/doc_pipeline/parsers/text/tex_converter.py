@@ -113,19 +113,12 @@ class TexContentConverter:
 
     def unknown(self, items: list, in_math=False) -> bool:
         for node in items:
-            if (
-                isinstance(node, LatexMacroNode)
-                and node.macroname == "href"
-                and node.nodeargd
-                and node.nodeargd.argnlist[0] is not None
-            ):
-                return True
-            if isinstance(node, LatexMacroNode) and node.macroname not in (
-                _SAFE_MACROS | _MATH_MACROS if in_math else _SAFE_MACROS
-            ):
-                return True
-            if isinstance(node, LatexMacroNode) and node.nodeargd:
-                if any(self.unknown([arg], in_math) for arg in node.nodeargd.argnlist if arg is not None):
+            if isinstance(node, LatexMacroNode):
+                if node.macroname == "href" and node.nodeargd and node.nodeargd.argnlist[0] is not None:
+                    return True
+                if node.macroname not in (_SAFE_MACROS | _MATH_MACROS if in_math else _SAFE_MACROS):
+                    return True
+                if any(self.unknown([arg], in_math) for arg in arguments(node) if arg is not None):
                     return True
             if isinstance(node, LatexEnvironmentNode):
                 if (
@@ -223,10 +216,10 @@ class TexContentConverter:
                     return None
             elif isinstance(child, LatexCommentNode):
                 continue
-            elif isinstance(child, LatexMathNode) and not self.unknown([child]):
-                cell.append(self.raw_node(child))
             elif self.unknown([child]):
                 return None
+            elif isinstance(child, LatexMathNode):
+                cell.append(self.raw_node(child))
             else:
                 cell.append(self.plain_text([child]))
         if row or "".join(cell).strip():

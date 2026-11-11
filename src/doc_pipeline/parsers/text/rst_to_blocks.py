@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 import re
 import textwrap
 from threading import Lock
@@ -10,7 +9,16 @@ from docutils.frontend import get_default_settings
 from docutils.parsers.rst import Parser, states
 from docutils.utils import new_document
 
-from doc_pipeline.contracts.document import Code, Equation, Furniture, Heading, Opaque, Text, TextBlock
+from doc_pipeline.contracts.document import (
+    Code,
+    Diagnostic,
+    Equation,
+    Furniture,
+    Heading,
+    Opaque,
+    Text,
+    TextBlock,
+)
 from doc_pipeline.parsers.text.assets import AssetResolver, image_payload
 from doc_pipeline.parsers.text.rst_renderer import RstRenderer, render_table
 from doc_pipeline.parsers.text.source import TextSource
@@ -56,29 +64,39 @@ _RESTRICTED_STATES = tuple(
 )
 
 
-def parse_rst(source: TextSource, resolve: AssetResolver) -> tuple[list[TextBlock], list[str]]:
-    diagnostics: list[str] = []
+def parse_rst(source: TextSource, resolve: AssetResolver) -> tuple[list[TextBlock], list[Diagnostic]]:
+    diagnostics: list[Diagnostic] = []
     if re.search(r"[\v\f\x85\u2028\u2029]", source.text):
-        return [], ["RST has unsupported line separators"]
+        return [], [Diagnostic(code="rst_unsupported_line_separators", action="retained_opaque", document_wide=True)]
     lines = source.text.split("\n")
-    warnings = io.StringIO()
     settings = get_default_settings(Parser)
     settings.file_insertion_enabled = False
     settings.raw_enabled = False
     settings.halt_level = 6
     settings.report_level = 2
-    settings.warning_stream = warnings
+    settings.warning_stream = False
     settings.syntax_highlight = "none"
-    tree = new_document("<rst-source>", settings)
+    source_label = "<rst-source>"
+    tree = new_document(source_label, settings)
     parser = Parser()
     parser.state_classes = _RESTRICTED_STATES
     # Docutils mutates a process-wide role registry during parsing.
     with _RST_PARSE_LOCK:
         parser.parse(source.text, tree)
-    # report_level hides INFO messages from the stream, but their nodes stay in the
-    # tree and would otherwise leak into astext() and reject valid containers.
+    for message in tree.parse_messages:
+        if message["level"] < settings.report_level:
+            continue
+        line = message.get("line")
+        if message.get("source") != source_label or type(line) is not int or not 1 <= line <= len(lines):
+            line = None
+        paragraph = message.children[0] if message.children else None
+        reason = f"{message['type']} {paragraph.astext()}" if isinstance(paragraph, nodes.paragraph) else None
+        diagnostics.append(Diagnostic(
+            code="docutils_diagnostic", action="noted", reason=reason, source_line=line,
+        ))
+    # INFO message nodes would otherwise leak into astext() and reject valid containers.
     for message in list(tree.findall(nodes.system_message)):
-        if message.get("level", 0) < 2:
+        if message.get("level", 0) < settings.report_level:
             message.parent.remove(message)
     renderer = RstRenderer(tree, resolve)
 
@@ -168,7 +186,9 @@ def parse_rst(source: TextSource, resolve: AssetResolver) -> tuple[list[TextBloc
             start = starts[index]
             if start is None:
                 if not isinstance(node, (nodes.target, nodes.system_message)):
-                    diagnostics.append(f"RST {node.tagname} has no verified source anchor; retained opaque.")
+                    diagnostics.append(Diagnostic(
+                        code="rst_unverified_anchor", action="omitted", reason=node.tagname,
+                    ))
                 continue
             later = [value for value in starts[index + 1 :] if value is not None and value > start]
             end = min(later + [bound])
@@ -236,8 +256,8 @@ def parse_rst(source: TextSource, resolve: AssetResolver) -> tuple[list[TextBloc
                         pattern = r"^\s*\.\. " + node.tagname + "::"
                     else:
                         pattern = {
-                            nodes.bullet_list: r"^\s*[-+*•‣⁃]\s+",
-                            nodes.enumerated_list: r"^\s*(?:\(?[\w#]+[.)])\s+",
+                            nodes.bullet_list: r"^\s*" + leads[nodes.bullet_list],
+                            nodes.enumerated_list: r"^\s*" + leads[nodes.enumerated_list],
                             nodes.block_quote: r"^\s+\S",
                             nodes.field_list: r"^\s*:[^:]+:",
                             nodes.definition_list: r"^\S"
@@ -341,14 +361,18 @@ def parse_rst(source: TextSource, resolve: AssetResolver) -> tuple[list[TextBloc
                     continue
             except ValueError as exc:
                 if isinstance(node, divisible) and node.children:
-                    diagnostics.append(f"RST line {start + 1}: {exc}; children interpreted separately")
+                    diagnostics.append(Diagnostic(
+                        code="rst_container_split", action="split", reason=str(exc), source_line=start + 1,
+                    ))
                     interpret([(child, depth) for child in node.children], end)
                     continue
                 payload = Opaque(source_text="", syntax="rst", reason=str(exc))
                 images = []
             a, b = source.line_offset(start), source.line_offset(end)
             if records and a < records[-1].end:
-                diagnostics.append(f"RST line {start + 1}: {node.tagname} overlaps previous record")
+                diagnostics.append(Diagnostic(
+                    code="rst_record_overlap", action="omitted", reason=node.tagname, source_line=start + 1,
+                ))
                 continue
             if payload is None:
                 payload = Text(plain_text=content, markdown=rendered, role=role,
@@ -356,5 +380,4 @@ def parse_rst(source: TextSource, resolve: AssetResolver) -> tuple[list[TextBloc
             records.append(TextBlock(a, b, payload, images=images))
 
     interpret(flat, len(lines))
-    diagnostics.extend(line for line in warnings.getvalue().splitlines() if line.strip())
     return records, diagnostics

@@ -8,6 +8,7 @@ from doc_pipeline.contracts.core import FileRef, InputFile, PipelineError, TextS
 from doc_pipeline.contracts.document import (
     Block,
     Code,
+    Diagnostic,
     Furniture,
     InlineAssetUse,
     Opaque,
@@ -98,7 +99,6 @@ def parse_text_document(source: InputFile, source_ref: FileRef, output_dir: Path
             payload = payload.model_copy(update={"text": original})
         elif isinstance(payload, Opaque):
             payload = payload.model_copy(update={"source_text": original})
-            diagnostics.append(f"opaque_source: line {span.first_line}: {payload.reason}")
         related = dict.fromkeys([
             *record.related_ranges,
             *(asset.definition for asset in record.images if asset.definition is not None),
@@ -130,7 +130,7 @@ def parse_text_document(source: InputFile, source_ref: FileRef, output_dir: Path
     cursor = 0
     for record in sorted(records, key=lambda entry: (entry.start, entry.end)):
         if not cursor <= record.start < record.end <= len(parsed_source.text):
-            diagnostics.append(f"invalid_parser_span: {record.start}:{record.end}")
+            diagnostics.append(Diagnostic(code="invalid_parser_span", action="omitted"))
             continue
         opaque_gap(cursor, record.start)
         add(record, parsed_source.span(record.start, record.end))

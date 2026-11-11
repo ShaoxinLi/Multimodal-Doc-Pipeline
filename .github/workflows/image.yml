@@ -65,11 +65,14 @@ jobs:
           out = Path("/out")
           report = json.loads((out / "report.json").read_text())
           chunks = [json.loads(line) for line in (out / "chunks.jsonl").read_text().splitlines()]
-          assert report["parse_status"] == "complete", report
-          assert report["chunk_count"] == len(chunks) == 1, report
-          assert report["chunking"] == {"target_input_bytes": 2400, "max_input_bytes": 6000}, report
-          assert report["embedding"] is None and report["embedding_count"] == 0, report
-          assert report["embedding_errors"] == [], report
+          assert report["run"]["state"] == "completed", report
+          assert report["result"]["chunks"] == {"parsed": 1, "partial": 0, "unparsed": 0}, report
+          assert len(chunks) == 1, report
+          assert report["stages"]["chunk"]["settings"] == {"target_input_bytes": 2400, "max_input_bytes": 6000}, report
+          assert report["stages"]["embed"]["state"] == "skipped", report
+          assert report["stages"]["embed"]["reason"] == "disabled", report
+          assert report["result"]["embedding"] == "n/a", report
+          assert report["issues"] == [], report
           assert (out / "embeddings.jsonl").read_text() == ""
           assert "Offline document processing." in (out / "content.md").read_text()
           assert chunks[0]["embedding_input"] == "Smoke\n\nOffline document processing."

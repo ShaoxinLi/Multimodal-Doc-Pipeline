@@ -17,6 +17,7 @@ from doc_pipeline.contracts.core import Range
 from doc_pipeline.contracts.document import (
     Cell,
     Code,
+    Diagnostic,
     Equation,
     Furniture,
     Heading,
@@ -169,7 +170,7 @@ def _row_width(raw: str) -> int:
     return len(cols) - int(cols[0] == "") - int(len(cols) > 1 and cols[-1] == "")
 
 
-def parse_markdown(source: TextSource, resolve: AssetResolver) -> tuple[list[TextBlock], list[str]]:
+def parse_markdown(source: TextSource, resolve: AssetResolver) -> tuple[list[TextBlock], list[Diagnostic]]:
     parser = MarkdownIt("commonmark", {"html": True, "inline_definitions": True, "store_labels": True})
     parser.enable("table").use(dollarmath_plugin).use(front_matter_plugin).use(
         footnote_plugin, move_to_end=False

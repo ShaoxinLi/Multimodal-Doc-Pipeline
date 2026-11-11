@@ -22,6 +22,7 @@ from doc_pipeline.contracts.core import Range
 from doc_pipeline.contracts.document import (
     Cell,
     Code,
+    Diagnostic,
     Equation,
     Furniture,
     Heading,
@@ -127,7 +128,7 @@ def _nodes_through_document(text: str, context) -> list | None:
     return None
 
 
-def parse_tex(source: TextSource, resolve: AssetResolver) -> tuple[list[TextBlock], list[str]]:
+def parse_tex(source: TextSource, resolve: AssetResolver) -> tuple[list[TextBlock], list[Diagnostic]]:
     text = source.text
     context = get_default_latex_context_db()
     context.add_context_category(
@@ -143,16 +144,28 @@ def parse_tex(source: TextSource, resolve: AssetResolver) -> tuple[list[TextBloc
         environments=[EnvironmentSpec("lstlisting", args_parser=_ListingBody())],
         prepend=True,
     )
-    diagnostics = []
+    diagnostics: list[Diagnostic] = []
     try:
         nodes, _, _ = LatexWalker(text, latex_context=context, tolerant_parsing=False).get_latex_nodes()
     except (LatexWalkerParseError, RecursionError) as error:
         nodes = _nodes_through_document(text, context)
-        if nodes is None:
-            return [], [f"TeX parse failed; entire source retained as opaque: {error}"]
-        diagnostics.append(
-            f"TeX parse failed after the document environment; trailing source retained as opaque: {error}"
+        line = None
+        if isinstance(error, LatexWalkerParseError):
+            reason = error.msg
+            if error.pos is not None and 0 <= error.pos <= len(text):
+                line = text.count("\n", 0, error.pos) + 1
+        else:
+            reason = "maximum parser recursion exceeded"
+        diagnostic = Diagnostic(
+            code="tex_parse_failed" if nodes is None else "tex_trailing_parse_failed",
+            action="retained_opaque",
+            reason=reason,
+            source_line=line,
+            document_wide=nodes is None and line is None,
         )
+        if nodes is None:
+            return [], [diagnostic]
+        diagnostics.append(diagnostic)
     records: list[TextBlock] = []
     title: tuple[str, int, int] | None = None
     syntax_nodes = TexContentConverter(text)

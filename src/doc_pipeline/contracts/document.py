@@ -133,12 +133,37 @@ class PdfPageMapping(Model):
     reason: str | None
 
 
+DiagnosticAction = Literal[
+    "retained_opaque", "unverified", "unarchived", "omitted",
+    "inferred", "retried", "split", "failed", "noted",
+]
+
+
+class Diagnostic(Model):
+    code: str
+    action: DiagnosticAction
+    reason: str | None = "n/a"
+    retryable: bool | Literal["n/a"] | None = "n/a"
+    block_id: str | None = None
+    source_line: int | None = Field(default=None, ge=1)
+    source_page: int | None = Field(default=None, ge=1)
+    asset: str | None = None
+    document_wide: bool = False
+
+
+class ProviderMetadata(Model):
+    backend: str | None = None
+    version: str | None = None
+    ocr_enabled: bool | None = None
+
+
 class ParsedContent(Model):
     blocks: list[Block]
     inline_assets: list[InlineAssetUse] = Field(default_factory=list)
     parse_status: Literal["complete", "partial"] = "complete"
-    diagnostics: list[str] = Field(default_factory=list)
+    diagnostics: list[Diagnostic] = Field(default_factory=list)
     pdf_pages: list[PdfPageMapping] = Field(default_factory=list)
+    provider_metadata: ProviderMetadata | None = None
 
 
 @dataclass(frozen=True)

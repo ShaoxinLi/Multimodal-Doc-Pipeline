@@ -1,8 +1,25 @@
-
-
-from doc_pipeline.contracts.document import Code, Furniture, Heading, Opaque
+from doc_pipeline.contracts.document import Code, Diagnostic, Furniture, Heading, Opaque
 from doc_pipeline.parsed_content.selection import canonical_text
 from tests.parsers.text.support import assert_provenance, parse
+
+
+def test_rst_reporter_diagnostic_omits_attached_source_excerpt(tmp_path):
+    original = (
+        "First paragraph.\r\n\r\n"
+        ".. unknown-directive:: SOURCE EXCERPT\r\n\r\n"
+        "   <rst-source>:57: (WARNING/2) This is source text.\r\n\r\n"
+        "Last paragraph.\r\n"
+    )
+    parsed = parse(tmp_path, "guide.rst", original)
+
+    assert parsed.diagnostics == [Diagnostic(
+        code="docutils_diagnostic",
+        action="noted",
+        reason='ERROR Unknown directive type "unknown-directive".',
+        source_line=3,
+    )]
+    assert "This is source text." in parsed.blocks[1].payload.source_text
+    assert_provenance(parsed, original)
 
 
 def test_rst_known_syntax_and_source_only_fallback(tmp_path):

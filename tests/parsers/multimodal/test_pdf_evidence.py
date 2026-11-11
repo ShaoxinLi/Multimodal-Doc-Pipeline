@@ -13,6 +13,7 @@ from doc_pipeline.chunking.builder import make_chunks
 from doc_pipeline.chunking.citations import export_chunks
 from doc_pipeline.contracts.config import Config, Limits
 from doc_pipeline.contracts.core import FileRef, SourceIdentity
+from doc_pipeline.contracts.document import Diagnostic, ProviderMetadata
 from doc_pipeline.parsed_content.md_renderer import render_markdown
 from doc_pipeline.parsed_content.selection import canonical_text
 from doc_pipeline.parsers.multimodal.parser import decode_archive
@@ -86,6 +87,29 @@ def test_verified_converted_geometry_stays_in_memory(tmp_path):
     assert block.location_precision == "enclosing"
     assert block.location_error == "original_pdf_page_unverified"
     assert not (tmp_path / "bundle/provider.pdf").exists()
+
+
+@pytest.mark.parametrize(
+    ("declarations", "metadata"),
+    [
+        ({}, ProviderMetadata()),
+        (
+            {"_backend": "pipeline", "_version_name": "2.7.6", "_ocr_enable": True},
+            ProviderMetadata(backend="pipeline", version="2.7.6", ocr_enabled=True),
+        ),
+        ({"_backend": [], "_version_name": 27, "_ocr_enable": "true"}, ProviderMetadata()),
+        ({"_backend": " ", "_version_name": {"major": 2}, "_ocr_enable": 1}, ProviderMetadata()),
+        ({"_ocr_enable": False}, ProviderMetadata(ocr_enabled=False)),
+    ],
+)
+def test_provider_declarations_preserve_usable_layout(tmp_path, declarations, metadata):
+    node, layout = _fixture()
+    parsed = _decode(tmp_path, node, {**layout, **declarations})
+
+    assert parsed.provider_metadata == metadata
+    assert parsed.blocks[0].payload.plain_text == "First"
+    assert len(parsed.blocks[0].locations) == 1
+    assert parsed.diagnostics == []
 
 
 def test_matching_pdf_bytes_reuse_original_source_location(tmp_path):
@@ -488,8 +512,6 @@ def test_table_attribute_whitespace_is_not_erased_when_verifying_evidence():
 
 
 def test_malformed_pdf_crop_box_leaves_content_without_a_location(tmp_path):
-    from pypdf.generic import ArrayObject, NameObject, NumberObject
-
     writer = PdfWriter()
     page = writer.add_blank_page(width=100, height=100)
     page[NameObject("/CropBox")] = ArrayObject([NumberObject(0), NumberObject(100)])
@@ -499,7 +521,7 @@ def test_malformed_pdf_crop_box_leaves_content_without_a_location(tmp_path):
     parsed = _decode(tmp_path, node, layout, provider=stream.getvalue())
     assert parsed.blocks[0].payload.plain_text == "First"
     assert parsed.blocks[0].locations == []
-    assert "mineru_invalid_provider_pdf" in parsed.diagnostics
+    assert Diagnostic(code="mineru_invalid_provider_pdf", action="unverified", document_wide=True) in parsed.diagnostics
 
 
 def _colored_pdf(colors, *, title="original", labels=False, oversized=False):

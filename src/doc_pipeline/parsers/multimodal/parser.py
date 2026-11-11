@@ -9,7 +9,14 @@ from zipfile import BadZipFile, ZipFile
 
 from doc_pipeline.contracts.config import Limits
 from doc_pipeline.contracts.core import FileRef, PagePosition, PipelineError, SheetPosition, SlidePosition
-from doc_pipeline.contracts.document import Block, Heading, Opaque, ParsedContent
+from doc_pipeline.contracts.document import (
+    Block,
+    Diagnostic,
+    Heading,
+    Opaque,
+    ParsedContent,
+    ProviderMetadata,
+)
 from doc_pipeline.parsers.multimodal.archive import open_validated_archive
 from doc_pipeline.parsers.multimodal.block_decoder import BlockDecoder
 from doc_pipeline.parsers.multimodal.markup_converter import string_value
@@ -54,19 +61,30 @@ def _page_groups(data: bytes) -> list[list[dict[str, Any]]]:
     return groups
 
 
-def _optional_member(
-    names: list[str],
-    member_dir: PurePosixPath,
-    basename: str,
-    diagnostics: list[str],
-) -> str | None:
+def _layout_member(names: list[str], member_dir: PurePosixPath, diagnostics: list[Diagnostic]) -> str | None:
+    basename = "layout.json"
     siblings = (member_dir / basename).as_posix()
     if siblings in names:
         return siblings
     matches = [name for name in names if PurePosixPath(name).name == basename]
-    if len(matches) > 1:
-        diagnostics.append(f"mineru_ambiguous_artifact {basename}")
-    return matches[0] if len(matches) == 1 else None
+    if len(matches) == 1:
+        return matches[0]
+    diagnostics.append(Diagnostic(
+        code="mineru_ambiguous_layout" if matches else "mineru_missing_layout",
+        action="unverified", document_wide=True,
+    ))
+    return None
+
+
+def _provider_metadata(layout: dict[str, Any]) -> ProviderMetadata:
+    backend = layout.get("_backend")
+    version = layout.get("_version_name")
+    ocr_enabled = layout.get("_ocr_enable")
+    return ProviderMetadata(
+        backend=backend if isinstance(backend, str) and backend.strip() else None,
+        version=version if isinstance(version, str) and version.strip() else None,
+        ocr_enabled=ocr_enabled if type(ocr_enabled) is bool else None,
+    )
 
 
 def decode_archive(
@@ -88,7 +106,7 @@ def decode_archive(
         member = primary[0]
         groups = _page_groups(archive.read(member))
 
-        diagnostics = []
+        diagnostics: list[Diagnostic] = []
         source_type = source_type or Path(source_ref.path).suffix.lower().lstrip(".")
         pdf_pages, office = [], {}
         if original_path is not None and source_type in {"pptx", "xlsx"}:
@@ -97,9 +115,13 @@ def decode_archive(
                 if hashlib.sha256(archive.read(origins[0])).hexdigest() == source_ref.sha256:
                     office = office_locations(original_path, source_type, groups, source_ref)
                 else:
-                    diagnostics.append("mineru_office_origin_mismatch")
+                    diagnostics.append(Diagnostic(
+                        code="mineru_office_origin_mismatch", action="unverified", document_wide=True,
+                    ))
             else:
-                diagnostics.append("mineru_office_origin_missing_or_ambiguous")
+                diagnostics.append(Diagnostic(
+                    code="mineru_office_origin_missing_or_ambiguous", action="unverified", document_wide=True,
+                ))
         pdf_ref = None
         frames = []
         candidates = [name for name in names if PurePosixPath(name).name.endswith("_origin.pdf")]
@@ -115,21 +137,26 @@ def decode_archive(
                 else:
                     pdf_ref = FileRef(path=candidates[0], sha256=digest)
             else:
-                diagnostics.append("mineru_invalid_provider_pdf")
+                diagnostics.append(Diagnostic(
+                    code="mineru_invalid_provider_pdf", action="unverified", document_wide=True,
+                ))
         elif len(candidates) > 1:
-            diagnostics.append("mineru_ambiguous_provider_pdf")
+            diagnostics.append(Diagnostic(
+                code="mineru_ambiguous_provider_pdf", action="unverified", document_wide=True,
+            ))
 
         layout = None
-        optional = _optional_member(names, PurePosixPath(member).parent, "layout.json", diagnostics)
+        provider_metadata = ProviderMetadata()
+        optional = _layout_member(names, PurePosixPath(member).parent, diagnostics)
         if optional is not None:
             try:
                 layout = _load_json(archive.read(optional))
+                if isinstance(layout, dict):
+                    provider_metadata = _provider_metadata(layout)
                 if not isinstance(layout, dict) or not isinstance(layout.get("pdf_info"), list):
                     raise ValueError("expected layout object with page list")
             except (ValueError, RecursionError):
-                diagnostics.append("mineru_invalid_layout")
-        else:
-            diagnostics.append("mineru_missing_layout")
+                diagnostics.append(Diagnostic(code="mineru_invalid_layout", action="unverified", document_wide=True))
 
         locations = PdfEvidenceMatcher(layout, pdf_ref, frames)
         decoder = BlockDecoder(archive, output_dir, member, locations)
@@ -159,19 +186,20 @@ def decode_archive(
                     })
                 blocks.append(block)
 
-    if any(block.location_precision == "unresolved" for block in blocks):
-        diagnostics.append("mineru_source_locations_unresolved")
     if not blocks:
-        diagnostics.append("mineru_empty_document")
+        diagnostics.append(Diagnostic(code="mineru_empty_document", action="noted", document_wide=True))
     blocks, inferred_headings = (blocks, False) if slides else restore_numbered_subsections(blocks)
     if inferred_headings:
-        diagnostics.append("mineru_heading_levels_inferred_from_numbering")
+        diagnostics.append(Diagnostic(
+            code="mineru_heading_levels_inferred_from_numbering", action="inferred", document_wide=True,
+        ))
     return ParsedContent(
         blocks=blocks,
         inline_assets=decoder.inline_assets,
         parse_status="partial" if any(isinstance(block.payload, Opaque) for block in blocks) else "complete",
         diagnostics=[*diagnostics, *decoder.diagnostics],
         pdf_pages=pdf_pages,
+        provider_metadata=provider_metadata,
     )
 
 

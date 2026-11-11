@@ -1,7 +1,11 @@
+import json
+
 import httpx
 import pytest
 
-from doc_pipeline import Config, PipelineError, process_file
+from doc_pipeline import Config, InputFile, PipelineError, process_file
+from doc_pipeline.parsers.multimodal.client import ArchiveFailure, obtain_archives
+from doc_pipeline.services.io import provider_reason
 from tests.support import write_source_pdf
 
 
@@ -24,7 +28,11 @@ def allocation_error(tmp_path, monkeypatch, caplog):
                 process_file(source_pdf, output, config, client=client)
 
         assert requests == [("POST", "/api/v4/file-urls/batch")]
-        assert not (output / "report.json").exists()
+        report = json.loads((output / "report.json").read_text())
+        assert report["run"]["state"] == "failed"
+        assert report["issues"][-1]["code"] == error.value.code
+        assert report["issues"][-1]["stage"] == "acquire"
+        assert {path.name for path in output.iterdir()} == {"report.json"}
         for private in ("private-provider-message", "private-mineru-key", "private-unknown-code"):
             assert private not in str(error.value) + caplog.text
         return error.value
@@ -85,3 +93,40 @@ def test_mineru_rejects_a_missing_response_code(allocation_error):
 def test_mineru_checks_response_data_after_integer_zero(allocation_error):
     error = allocation_error(code=0, data=[])
     assert (error.stage, error.code, error.retryable) == ("parse", "invalid_provider_response", False)
+
+
+def test_provider_reason_retains_specific_message_and_removes_sensitive_details():
+    assert provider_reason("The file exceeds 10 MB; Authorization: Bearer private-token; "
+                           "https://signed.test/archive?token=secret\nRequest body: private-input") == (
+        "The file exceeds 10 MB; [redacted]; [redacted]"
+    )
+    assert provider_reason(None) is None
+    assert provider_reason({"msg": "not text"}) is None
+
+
+def test_mineru_terminal_error_preserves_sanitized_concrete_reason(tmp_path):
+    source = tmp_path / "0.pdf"
+    source.write_bytes(b"source")
+    submitted = []
+
+    def handle(request):
+        if request.method == "POST":
+            submitted.extend(json.loads(request.content)["files"])
+            return httpx.Response(200, json={"code": 0, "data": {
+                "batch_id": "batch", "file_urls": ["https://transfer.test/upload"],
+            }})
+        if request.method == "PUT":
+            return httpx.Response(200)
+        return httpx.Response(200, json={"code": 0, "data": {"extract_result": [{
+            "data_id": submitted[0]["data_id"], "state": "failed",
+            "err_msg": "File exceeds 10 MB for private-key. https://signed.test/?sig=private-signature\nraw source",
+            "extract_progress": {"total_pages": 1, "extracted_pages": 0},
+        }]}})
+
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        [result] = obtain_archives([(0, InputFile(path=source))], Config(mineru={"api_key": "private-key"}), client, tmp_path)
+    assert isinstance(result, ArchiveFailure)
+    assert result.error.code == "mineru_parse_failed"
+    assert result.error.reason == "File exceeds 10 MB for [redacted]. [redacted]"
+    assert result.observation.total_pages == 1
+    assert result.observation.extracted_pages == 0

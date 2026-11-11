@@ -92,9 +92,10 @@ Location = Annotated[TextSpan | PdfRegion | PagePosition | SlidePosition | Sheet
 
 
 class PipelineError(Exception):
-    def __init__(self, stage: str, code: str, retryable: bool = False):
+    def __init__(self, stage: str, code: str, retryable: bool = False, *, reason: str | None = "n/a"):
         super().__init__(code)
         self.stage, self.code, self.retryable = stage, code, retryable
+        self.reason = reason
 
 
 def line_ends(text: str) -> list[int]:

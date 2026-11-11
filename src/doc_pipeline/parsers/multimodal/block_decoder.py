@@ -16,6 +16,7 @@ from doc_pipeline.contracts.document import (
     AssetResolution,
     Block,
     Code,
+    Diagnostic,
     Equation,
     Furniture,
     Heading,
@@ -112,7 +113,7 @@ class BlockDecoder:
         self.output_dir = output_dir
         self.member_dir = PurePosixPath(member).parent
         self.locations = locations
-        self.diagnostics: list[str] = []
+        self.diagnostics: list[Diagnostic] = []
         self.inline_assets: list[InlineAssetUse] = []
         self.assets: dict[str, tuple[FileRef | None, AssetResolution]] = {}
 
@@ -144,13 +145,10 @@ class BlockDecoder:
         write_bytes(path, data)
         return FileRef(path=relative, sha256=digest), "archived"
 
-    def _asset(self, reference: str, block_id: str) -> tuple[FileRef | None, AssetResolution]:
+    def _asset(self, reference: str) -> tuple[FileRef | None, AssetResolution]:
         if reference not in self.assets:
             self.assets[reference] = self._resolve_asset(reference) if reference else (None, "missing_snapshot")
-        asset, resolution = self.assets[reference]
-        if asset is None:
-            self.diagnostics.append(f"mineru_asset_{resolution} {block_id}")
-        return asset, resolution
+        return self.assets[reference]
 
     def _inline_asset(
         self,
@@ -159,7 +157,7 @@ class BlockDecoder:
         alt: str = "",
         table_cell: tuple[int, int] | None = None,
     ) -> FileRef | None:
-        asset, resolution = self._asset(reference, block_id)
+        asset, resolution = self._asset(reference)
         self.inline_assets.append(
             InlineAssetUse(
                 owner_block_id=block_id,
@@ -185,7 +183,6 @@ class BlockDecoder:
                 reason="unsupported_or_invalid_v2_block",
                 source_text=json.dumps(node, ensure_ascii=True, separators=(",", ":")),
             )
-            self.diagnostics.append(f"mineru_opaque_block {block_id}")
 
         evidence = (
             BlockEvidence([], "provider_block_payload_unsupported")
@@ -202,9 +199,7 @@ class BlockDecoder:
             location_error=evidence.reason,
         )
         if not isinstance(payload, Image) and not canonical_text(block).strip():
-            self.diagnostics.append(f"mineru_empty_block {block_id}")
-        if not evidence.regions:
-            self.diagnostics.append(f"mineru_source_location_unresolved {block_id} {evidence.reason}")
+            self.diagnostics.append(Diagnostic(code="mineru_empty_block", action="omitted", block_id=block_id))
         return block
 
     def _payload(
@@ -270,7 +265,7 @@ class BlockDecoder:
             equation = Equation(source=string_value(content["math_content"]), format=string_value(content["math_type"]))
             if reference := _image_reference(content):
                 if not equation.source.strip():
-                    asset, resolution = self._asset(reference, block_id)
+                    asset, resolution = self._asset(reference)
                     return Image(asset=asset, original_reference=reference, resolution=resolution)
                 self._inline_asset(reference, block_id)
             return equation
@@ -304,7 +299,7 @@ class BlockDecoder:
                     self._inline_asset(reference, block_id)
                 return table
             alt = string_value(content.get("alt", ""))
-            asset, resolution = self._asset(reference, block_id)
+            asset, resolution = self._asset(reference)
             return Image(
                 asset=asset,
                 original_reference=reference,

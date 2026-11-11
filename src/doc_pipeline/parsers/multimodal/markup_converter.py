@@ -53,7 +53,8 @@ def escape_markdown_text(text: str) -> str:
 def _styled_text(value: str, span: dict[str, Any]) -> tuple[str, str]:
     soup = BeautifulSoup(value, "html.parser")
     allowed = {"sup", "sub", "b", "strong", "i", "em", "u", "s"}
-    if soup.find(True) and all(tag.name in allowed and not tag.attrs for tag in soup.find_all(True)):
+    tags = soup.find_all(True)
+    if tags and all(tag.name in allowed and not tag.attrs for tag in tags):
         plain = soup.get_text()
         markdown = "".join(
             str(child) if isinstance(child, Tag) else escape_markdown_text(str(child)) for child in soup.contents

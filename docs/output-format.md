@@ -9,14 +9,14 @@
 | `content.md` | Readable document rendering. |
 | `chunks.jsonl` | One compact chunk record per line. |
 | `embeddings.jsonl` | Successful embedding vectors, empty when embedding is disabled. |
-| `report.json` | Per-file processing status, counts, diagnostics, and timings. |
+| `report.json` | Document checkpoint with source, stage, result, and issue details. |
 | `assets/` | Referenced media, when present. Paths are relative to the document output directory. |
 
 JSON and JSONL use UTF-8. Each JSONL record ends with LF. Empty JSONL files contain zero bytes. Batch output also includes `run.json`, with per-file outputs in ordinal directories such as `0001/`.
 
-The pipeline uses private input captures during processing to keep source hashes and parsed bytes consistent. It does not retain the source document or MinerU response archive in the output. Original-source access belongs to the caller through `citations.source_uri`.
+The pipeline captures the input bytes and downloads MinerU archives in private working directories. Published output contains the Markdown, chunk records, vectors, reports, and referenced media. `citations.source_uri` points to the original source.
 
-Each document is prepared in private staging before publication. The pipeline preserves an existing output directory, including a mounted directory, and installs `report.json` last. Output locking uses POSIX filesystem operations on macOS and Linux, including the Docker image.
+The pipeline locks the output directory and keeps its inode, including on a mounted directory. It prepares the document files in private staging, installs the files, and then updates `report.json` to `completed`. Read the document files as published output only when `report.json` has `run.state = "completed"`. Output locking uses POSIX filesystem operations on macOS and Linux, including the Docker image.
 
 ## `chunks.jsonl`
 
@@ -143,79 +143,106 @@ Each successful record contains `chunk_id`, `input_sha256`, `profile`, and `vect
 
 ## `report.json`
 
-The single-file API returns the same object that it writes to `report.json`.
+The single-file API returns the same object that it writes to `report.json` on completion. Report schema version 2 uses the same keys across formats.
 
 | Field | Meaning |
 | --- | --- |
-| `source` | Resolved intake path and snapshot byte digest for the run report. |
-| `parse_status` | `complete` or `partial`. Partial means that the parsed document contains opaque content. |
-| `chunk_count`, `embedding_count` | Number of exported chunks and successful vectors. |
-| `chunking` | Effective `target_input_bytes` and `max_input_bytes`. |
-| `embedding` | Configured `model` and `dimensions`, or `null` when disabled. `dimensions` stays `null` if unspecified. |
-| `embedding_errors` | Per-chunk errors with `chunk_id`, `code`, and `retryable`. |
-| `diagnostics` | Parser and asset diagnostic strings. A nonempty array does not necessarily mean partial parsing. |
-| `execution` | Execution record described below. |
+| `schema_version` | Integer `2`. |
+| `pipeline` | Package `version` and build `revision`. Set `DOC_PIPELINE_REVISION` to supply a revision. The value is `null` when the variable is unset or empty. |
+| `run` | Run `id`, zero-based input `index`, UTC `started_at`, `elapsed_seconds`, and lifecycle `state`. A single-file call uses index `0`. |
+| `source` | Input `name`, `uri`, `document_id`, `document_version`, `format`, `sha256`, and `bytes`. The URI defaults to the resolved file URI. The digest and size come from the captured bytes and are `null` until capture completes. An unspecified document version is `"n/a"`. |
+| `stages` | Execution records for the seven stages below. |
+| `result` | Three distributions over the published chunks. |
+| `issues` | Grouped diagnostics, limitations, recovery actions, and failures. |
 
-### Execution record
+`0` and `[]` represent a known zero count or empty list. `"n/a"` means the field does not apply to the run. `null` means a value is unknown, has yet to be observed, or depends on publication.
+
+### Run and stage timing
+
+`run.state` is `running`, `completed`, `failed`, or `interrupted`. `completed` means the pipeline published the document files. The result distributions and issues describe partial parsing, missing source locations, and embedding errors independently.
+
+Each stage has a `state`, `seconds`, and `reason`. The states are `not_started`, `running`, `succeeded`, `failed`, `skipped`, `not_applicable`, `not_reached`, and `interrupted`. `reason` explains a non-execution path, such as `disabled` or `upstream_failed`. Failures have details in `issues`. Stage time is `"n/a"` for a stage that does not run.
+
+| Stage | Work and additional fields |
+| --- | --- |
+| `intake` | Captures and validates the input. `encoding` is the configured text encoding for local formats and `"n/a"` for remote formats. |
+| `acquire` | Submits and uploads remote inputs, waits for MinerU, and downloads its archives. `service` is described below. Local formats use `"n/a"`. |
+| `parse` | Parses local input or decodes the provider archive. |
+| `render` | Renders Markdown and records source block mappings. |
+| `chunk` | Builds chunks. `settings` contains `target_input_bytes` and `max_input_bytes`. |
+| `embed` | Generates vectors. `profile` contains `model`, requested `dimensions`, and `endpoint_sha256`. Provider-selected dimensions use `"n/a"`. `usage` is described below. A disabled stage uses `"n/a"` for both fields. |
+| `write` | Writes and installs the document files. |
+
+Run elapsed time uses a monotonic clock and includes time between stages. The terminal snapshot includes completed file installation and excludes the write of the snapshot itself. Acquisition time starts when the group is submitted and ends when the document's archive is downloaded or acquisition fails. It can include shared waits and download queuing. Acquisition intervals can overlap across documents. Use the batch's own elapsed time for the batch duration.
+
+### Service observations
+
+`stages.acquire.service` contains an endpoint digest in `endpoint_sha256`, the service's `batch_id` and `data_id`, and the following objects.
 
 | Field | Meaning |
 | --- | --- |
-| `run_id` | Identifier shared by all files in a batch, or assigned to a single-file call. |
-| `started_at`, `finished_at`, `elapsed_seconds` | Per-file timing. |
-| `stage_seconds` | Timings for observed stages, such as `intake`, `remote_acquisition`, `parse`, `render`, `chunk`, `write`, and `embedding`. Unreached stages are absent. |
-| `status` | `complete`, `partial`, or `failed`, as defined below. |
-| `parse_status` | Parse result, or `null` if parsing did not return. |
-| `chunk_count`, `embedding_count`, `embedding_error_count` | Counts observed before the record was finalized. |
-| `mineru` | Optional provider observation with `data_id`, `batch_id`, `total_pages`, `extracted_pages`, and `options`. Unknown observations are `null`. |
-| `embedding_usage` | Optional token-usage observations, described below. |
-| `error` | Present for a fatal file error in the batch record. Contains `stage`, `code`, and `retryable`. |
+| `requested` | Requested `model_version`, `enable_formula`, `enable_table`, `language`, and `is_ocr`. |
+| `observed` | `backend`, `version`, and `ocr_enabled` as declared by the validated archive. The reported version describes the archive producer. |
+| `progress` | The last accepted `total_pages` and `extracted_pages` counts. These are provider progress observations. Use `result.locations` for chunk citation coverage. |
 
-`mineru.options` contains `model_version`, `enable_formula`, `enable_table`, `language`, and `is_ocr`. Provider page counts describe processing progress, not verified citation coverage.
+Unobserved values are `null`. Embedding usage records actual HTTP `requests` and `responses`, including retries, splits, and error responses. Each of `prompt_tokens` and `total_tokens` contains `observed` and `reported_responses`. `observed` sums valid counts. It is `0` when the stage sent zero requests and `null` when requests were sent but no response supplied that token counter. `reported_responses` gives the coverage of each sum.
 
-`embedding_usage` contains `responses`, `prompt_tokens`, and `total_tokens`. Each token field contains `observed_tokens` and `responses_with_usage`. `observed_tokens` is `null` when no response supplied that counter. Otherwise it sums the reported values, which can cover fewer than `responses` responses. Usage observations do not guarantee that vectors passed validation.
+### Result distributions
 
-The execution snapshot is taken before the final report write. Its timing does not include that write. Per-file elapsed time can include waiting between stages, so it need not equal the sum of stage timings.
+| Field | Counters |
+| --- | --- |
+| `result.chunks` | `parsed`, `partial`, and `unparsed`, from `metadata.content_status`. |
+| `result.locations` | `known`, `partial`, and `unavailable`, from `citations.location_status`. |
+| `result.embedding` | `succeeded`, `failed`, and `ineligible`. A chunk with a null `embedding_input` is ineligible. |
+
+Each distribution partitions the published chunks. Sum `result.chunks` for the chunk count and read `result.embedding.succeeded` for the vector count. An empty published document has all-zero counters. Before publication, each applicable distribution is `null`. Disabled embedding has `result.embedding = "n/a"`.
+
+### Issues
+
+The pipeline groups issues by `stage`, `code`, `reason`, `action`, and `retryable`, in order of first occurrence.
+
+| Field | Meaning |
+| --- | --- |
+| `stage`, `code` | Stage name and machine-readable issue code. |
+| `reason` | Specific cause, including sanitized service details when available. `"n/a"` means the issue has no finer reason. `null` means a reason is unavailable. |
+| `action` | `retained_opaque`, `unverified`, `unarchived`, `omitted`, `inferred`, `retried`, `split`, `failed`, or `noted`. |
+| `retryable` | Boolean for a classified error, `null` when retryability is unknown, or `"n/a"` for a diagnostic. |
+| `occurrences` | Number of occurrences in the group. |
+| `targets` | Locations or assets affected by the issue. Each target contains `unit` and `values`. |
+| `unlocated` | Number of local occurrences without a reliable target. |
+
+Targets with unit `chunk`, `content_line`, `source_line`, or `source_page` use merged inclusive intervals. Chunk indices start at zero. Line and page numbers start at one. An `asset` target lists reference strings. URL credentials, query parameters, and fragments are removed. Inline data URIs have no asset target. A `document` target has `values = "n/a"`. A target can cover several occurrences, and one occurrence can span several chunks. Before publication, block issues use verified original source lines or pages where available. A failed report never points to an unpublished chunk or Markdown line. Occurrences without a durable target remain in `unlocated`.
 
 ## `run.json`
 
-`process_files` returns the same aggregate object that it writes to `run.json`, including when called with a single input. The CLI selects batch mode only when given multiple inputs.
+`process_files` returns the same object it writes to `run.json`, including when called with a single input. The CLI selects batch mode when it receives multiple inputs.
 
 | Field | Meaning |
 | --- | --- |
-| `run_id`, `started_at`, `finished_at`, `elapsed_seconds` | Batch identity and timing. |
-| `status` | `failed` if every file failed, `partial` if any file failed or was partial, otherwise `complete`. |
-| `file_count` | Number of inputs. |
-| `complete_file_count`, `partial_file_count`, `failed_file_count` | Counts by per-file execution status. |
-| `chunk_count`, `embedding_count`, `embedding_error_count` | Sums of the per-file counters. A failed file's counters can reflect work completed before failure. |
-| `embedding_usage` | Aggregate usage observations. Present when embedding is configured. |
-| `files` | Per-file entries in input order. |
+| `schema_version` | Integer `2`. |
+| `run` | Batch `id`, UTC `started_at`, `elapsed_seconds`, and lifecycle `state`. `completed` means the coordinator finished the batch and recorded every file. Individual files can fail. |
+| `settings` | `local_workers` and `mineru_batch_size`. |
+| `mineru_requests` | HTTP `requests` and `responses` for each of `submit`, `poll`, `upload`, and `download`. Shared calls are counted once. `"n/a"` means MinerU was not used. |
+| `files` | Document entries in input order. |
 
-Each `files` entry contains `index`, `input`, `report`, and the execution-record fields directly, without an `execution` wrapper. `input` is the submitted `Path` converted to a string, without resolving it to an absolute path. `report` is a path relative to the batch root, such as `0001/report.json`, or `null` for a failed file.
+Each file entry contains a zero-based `index`, an output-relative `report` path such as `0001/report.json`, and `unreported`. When a document report is available, including for a failed file, `unreported` is `"n/a"`. If a document checkpoint cannot be created or updated, `report` is `null`. An older `running` checkpoint may still exist on disk. `unreported` carries `source_uri`, `stage`, `code`, `reason`, and `retryable`. Each referenced document has the batch's `run.id` and its own `run.index` and timing.
 
 ## Status and failure semantics
 
-The three status concepts are independent.
+After obtaining the output lock, the pipeline writes atomic snapshots to `report.json` and, for a batch, to `run.json`. A caught fatal document error leaves a `failed` report and discards its staged files. A caught interruption updates the affected snapshots to `interrupted` where possible. A caught publication failure rolls back the installed document files. Previously completed siblings remain available.
 
-| Value | What it describes |
-| --- | --- |
-| `parse_status` | Whether the parser preserved any content as opaque rather than interpreting it. |
-| Per-file `status` | `failed` for a fatal error. Otherwise `partial` for partial parsing or any embedding error. Otherwise `complete`. |
-| Citation `location_status` | Coverage of verified original-source locations for the chunk body. |
+A process killed with SIGKILL can leave a `running` snapshot and temporary files. A `running` snapshot records the last checkpoint, which may outlast the process. Report files can be absent if the pipeline cannot acquire the directory, write the first snapshot, or reach the first checkpoint. Each snapshot is replaced atomically. Publication as a whole consists of multiple filesystem operations.
 
-Embedding disabled, an empty document, or missing citation coordinates can still produce `status: "complete"`. A partial document can still contain usable chunks and vectors.
+The Python single-file API raises on fatal errors. The batch API records caught file errors in the individual reports or in `files[].unreported`. Expected embedding errors still allow publication of the parsed content and successful vectors. The pipeline requires a new or empty output directory for each call, including retries.
 
-A fatal single-file error raises an exception instead of returning a report. A caught batch file error is recorded in `run.json`. A fatal error before publication leaves no completed document output. Expected embedding errors still produce content and a report, with successful vectors when available. Interruption can prevent the final batch report.
-
-The CLI prints a summary to stdout in a terminal and JSON when stdout is redirected. Use `--format text` or `--format json` to choose the format. Text-mode errors go to stderr. Progress also goes to stderr and appears by default when stderr is a terminal. Use `--progress` or `--no-progress` to override the default.
+The CLI uses text in a terminal and JSON when stdout is redirected. Use `--format text` or `--format json` to choose. In JSON mode, stdout contains the returned report for a completed run or an error object if the call raises a handled exception. Text errors and progress go to stderr. Progress appears by default when stderr is a terminal. Use `--progress` or `--no-progress` to override the default.
 
 | Exit code | Meaning |
 | --- | --- |
-| `0` | Processing finished without fatal file errors or embedding errors. Partial parsing alone still returns `0`. |
+| `0` | Processing finished without fatal file errors or embedding errors. Partial parsing alone returns `0`. |
 | `65` | Non-retryable fatal error, or invalid configuration or input. In a batch, any non-retryable fatal file error takes precedence. |
 | `75` | Retryable fatal error or any embedding error, including embedding errors whose own `retryable` field is false. |
 | `130` | Interrupted execution, including SIGINT and SIGTERM. |
-| `2` | Invalid CLI arguments reported by the argument parser. The argument parser prints usage to stderr. |
+| `2` | Invalid CLI arguments. The argument parser prints usage to stderr. |
 
-`retryable` describes an individual error. It does not mean that a run can resume in its existing output directory. The pipeline requires an empty or nonexistent output directory for each call.
-
-The [chunk contracts](../src/doc_pipeline/contracts/chunk.py) define the serialized fields. The [architecture page](architecture.md) describes how parsing, chunking, and publication fit together.
+The [chunk contracts](../src/doc_pipeline/contracts/chunk.py) define the serialized chunk fields. The [architecture page](architecture.md) describes how parsing, chunking, and publication fit together.
