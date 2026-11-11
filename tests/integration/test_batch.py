@@ -9,7 +9,7 @@ import httpx
 import pytest
 from docutils.parsers.rst import roles
 
-from doc_pipeline import Artifact, Config, InputFile, PipelineError, pipeline, process_files
+from doc_pipeline import Config, InputFile, PipelineError, pipeline, process_files
 from doc_pipeline.cli import main
 from doc_pipeline.contracts import run as run_contract
 from doc_pipeline.parsers.multimodal import client as provider_client
@@ -283,21 +283,21 @@ def test_timeout_preserves_completed_and_does_not_charge_downloads(tmp_path, mon
 
 
 def test_per_file_failures_leave_successful_sibling_and_clean_completion_markers(tmp_path, monkeypatch):
-    from doc_pipeline.artifacts import store
+    from doc_pipeline import pipeline
 
     source_pdf = write_source_pdf(tmp_path)
     monkeypatch.delenv("MINERU_API_KEY", raising=False)
-    original_install = store._install
+    original_install = pipeline.install_output
 
-    def fail_install(staging, destination):
+    def fail_install(staging, destination, **kwargs):
         if destination == output / "0006":
             assert list(destination.iterdir()) == []
             assert (staging / "content.md").is_file()
             (staging / "chunks.jsonl").write_text("unfinished")
             raise OSError("private local path or error")
-        original_install(staging, destination)
+        original_install(staging, destination, **kwargs)
 
-    monkeypatch.setattr(store, "_install", fail_install)
+    monkeypatch.setattr(pipeline, "install_output", fail_install)
     service = BatchService(
         poll=lambda service: [service.row(1, "failed", err_msg="private provider error"), *service.done(2, 3, 4, 5)],
         upload_failure=0, download_failure=2, archives={3: b"invalid ZIP"},
@@ -452,7 +452,7 @@ def test_empty_batch_rejected(tmp_path):
 
 
 @pytest.mark.parametrize("model", ["pipeline", "vlm"])
-def test_batch_sends_model_option_and_keeps_converted_geometry_in_evidence(tmp_path, monkeypatch, model):
+def test_batch_sends_model_option_and_keeps_unverified_pages_unavailable(tmp_path, monkeypatch, model):
     source_pdf = write_source_pdf(tmp_path)
     monkeypatch.delenv("MINERU_API_KEY", raising=False)
     service = BatchService()
@@ -470,14 +470,9 @@ def test_batch_sends_model_option_and_keeps_converted_geometry_in_evidence(tmp_p
         "mineru_source_location_unresolved g0001-b0001 provider_block_match_ambiguous",
     ]
     assert chunks
-    artifact = Artifact.open(bundle)
     for chunk in chunks:
         assert chunk["citations"]["pages"] is None
         assert chunk["citations"]["location_status"] == "unavailable"
-        selections, _ = artifact.evidence(chunk["id"])
-        [heading] = [item for item in selections.selections if item.role == "heading"]
-        assert heading.locations[0].path == "native/provider.pdf"
-        assert all(not item.locations for item in selections.selections if item.role == "body")
-    assert (bundle / "native" / "mineru.zip").is_file()
-    assert (bundle / "native" / "provider.pdf").is_file()
+    assert not (bundle / "native").exists()
+    assert not (bundle / "source").exists()
     assert "Pipeline probe section 1" in (bundle / "content.md").read_text()

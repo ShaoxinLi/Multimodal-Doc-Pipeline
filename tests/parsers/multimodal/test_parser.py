@@ -28,7 +28,7 @@ def test_repeated_paragraphs_keep_content_without_claiming_ambiguous_locations(t
         [region] = block.locations
         assert block.location_precision == "enclosing"
         assert region.page_index == page
-        assert region.source.path == "native/provider.pdf"
+        assert region.source.path == "result_origin.pdf"
     for block in (first_paragraph, second_paragraph):
         assert canonical_text(block) == "Repeated paragraph."
         assert block.locations == []
@@ -150,7 +150,7 @@ def _office(tmp_path, suffix, groups, *, matching=True):
         else:
             source.writestr("xl/workbook.xml", '<workbook><sheets><sheet name="One"/><sheet name="Two"/></sheets></workbook>')
     original = path.read_bytes()
-    ref = FileRef(path=f"source/original.{suffix}", sha256=hashlib.sha256(original).hexdigest())
+    ref = FileRef(path=str(path.resolve()), sha256=hashlib.sha256(original).hexdigest())
     archive = tmp_path / "archive.zip"
     with ZipFile(archive, "w") as raw:
         raw.writestr(f"office_origin.{suffix}", original if matching else original + b"changed")

@@ -1,11 +1,17 @@
+import errno
 import hashlib
 import json
 import logging
+import os
+import shutil
+import tempfile
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
+from fcntl import LOCK_EX, LOCK_NB, flock
 from pathlib import Path
+from stat import S_IMODE, S_ISREG
 from urllib.parse import urlsplit
 
 import httpx
@@ -123,3 +129,104 @@ def transfer_url(url: str) -> str:
             or (parsed.scheme == "http" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"})):
         raise PipelineError("parse", "unsafe_provider_url")
     return url
+
+
+@contextmanager
+def empty_destination(destination: Path):
+    destination = destination.resolve()
+    try:
+        destination.mkdir(parents=True)
+        created = True
+    except FileExistsError:
+        created = False
+    descriptor = os.open(destination, os.O_RDONLY | os.O_DIRECTORY)
+    acquired = False
+    try:
+        try:
+            flock(descriptor, LOCK_EX | LOCK_NB)
+        except BlockingIOError as error:
+            raise PipelineError("intake", "output_in_use") from error
+        acquired = True
+        if any(destination.iterdir()):
+            raise PipelineError("intake", "output_not_empty")
+        yield destination
+    finally:
+        if created and acquired:
+            try:
+                current, opened = destination.stat(), os.fstat(descriptor)
+                if (current.st_dev, current.st_ino) == (opened.st_dev, opened.st_ino):
+                    destination.rmdir()
+            except OSError:
+                pass
+        os.close(descriptor)
+
+
+@contextmanager
+def staging_directory(destination: Path):
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    parent = destination if destination.is_dir() else destination.parent
+    try:
+        temporary = tempfile.TemporaryDirectory(prefix=".doc-pipeline-", dir=parent)
+    except PermissionError:
+        temporary = tempfile.TemporaryDirectory(prefix=".doc-pipeline-", dir=destination)
+    with temporary as directory:
+        yield Path(directory)
+
+
+def capture_file(path: Path, target: Path, limit: int, error_code: str) -> str:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    checksum = hashlib.sha256()
+    flags = os.O_RDONLY | os.O_NONBLOCK
+    with os.fdopen(os.open(path, flags), "rb") as source, target.open("xb") as snapshot:
+        info = os.fstat(source.fileno())
+        if not S_ISREG(info.st_mode):
+            raise PipelineError("intake", "invalid_input_file")
+        if info.st_size > limit:
+            raise PipelineError("intake", error_code)
+        remaining = limit
+        while data := source.read(min(1024 * 1024, remaining + 1)):
+            remaining -= len(data)
+            if remaining < 0:
+                raise PipelineError("intake", error_code)
+            checksum.update(data)
+            snapshot.write(data)
+    return checksum.hexdigest()
+
+
+def install_output(staging: Path, destination: Path, *, preserve_directory: bool) -> None:
+    if not preserve_directory:
+        mode = S_IMODE(destination.stat().st_mode)
+        staging.chmod(mode)
+        try:
+            staging.rename(destination)
+        except OSError as error:
+            if error.errno not in {errno.EBUSY, errno.EXDEV}:
+                raise
+        else:
+            return
+    installed = []
+    try:
+        for path in staging.iterdir():
+            if path.name == "report.json":
+                continue
+            target = destination / path.name
+            if target.exists() or target.is_symlink():
+                raise PipelineError("write", "output_not_empty")
+            installed.append(target)
+            shutil.move(path, target)
+        report = destination / "report.json"
+        if report.exists() or report.is_symlink():
+            raise PipelineError("write", "output_not_empty")
+        temporary = destination / ".report.json.tmp"
+        with temporary.open("xb") as stream:
+            installed.append(temporary)
+            stream.write((staging / "report.json").read_bytes())
+        installed.append(report)
+        temporary.rename(report)
+    except BaseException:
+        for target in reversed(installed):
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink(missing_ok=True)
+        raise

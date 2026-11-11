@@ -1,24 +1,22 @@
+import hashlib
+import json
 import re
 from collections import defaultdict
 
-from doc_pipeline.contracts.artifact import (
-    ChunkCitations,
-    ChunkMetadata,
-    ChunkPayload,
-    ObjectCitation,
-    Page,
-    Resource,
-    Sheet,
-    TablePart,
-    chunk_digest,
-)
 from doc_pipeline.contracts.chunk import (
     Chunk,
+    ChunkCitations,
+    ChunkMetadata,
     Citation,
+    ExportedChunk,
     MarkdownLocation,
+    ObjectCitation,
+    Page,
     Part,
     PdfLocation,
     Selector,
+    Sheet,
+    TablePart,
     TableRows,
     TextLocation,
     Whole,
@@ -238,7 +236,7 @@ class Citations:
 
 
 def export_chunks(chunks: list[Chunk], parsed: ParsedContent, *, source: FileRef, identity: SourceIdentity,
-                  source_type: str, resources: dict[str, Resource]):
+                  source_type: str, asset_digests: dict[str, str]):
     blocks = {block.id: block for block in parsed.blocks}
     page_labels = {page.number: page.label for page in parsed.pdf_pages if page.basis != "unmapped"}
     for chunk in chunks:
@@ -285,7 +283,7 @@ def export_chunks(chunks: list[Chunk], parsed: ParsedContent, *, source: FileRef
                     part=TablePart(table_rows=(rows.start, rows.end)) if rows else None,
                 ))
 
-        yield ChunkPayload(
+        yield ExportedChunk(
             id=chunk.id, body=chunk.body, heading_path=chunk.heading_path,
             embedding_input=chunk.embedding_input, assets=list(dict.fromkeys(uses)),
             citations=ChunkCitations(
@@ -299,8 +297,25 @@ def export_chunks(chunks: list[Chunk], parsed: ParsedContent, *, source: FileRef
             metadata=ChunkMetadata(
                 document_id=identity.document_id, document_version=identity.version, source_sha256=source.sha256,
                 chunk_sha256=chunk_digest(chunk.body, chunk.heading_path, chunk.embedding_input,
-                                          [resources[key].file.sha256 for key in uses]),
+                                          [asset_digests[key] for key in uses]),
                 source_type=source_type,
                 content_status=("unparsed" if opaque == len(ranges) else "partial") if opaque else "parsed",
             ),
         )
+
+
+def canonical(value) -> bytes:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+
+
+def digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def chunk_digest(body: str, heading_path: list[str], embedding_input: str | None, content_assets: list[str]) -> str:
+    return digest(canonical({
+        "body": body,
+        "heading_path": heading_path,
+        "embedding_input": embedding_input,
+        "content_assets": content_assets,
+    }))

@@ -26,7 +26,7 @@ def _zip(path, entries):
 
 
 def _decode(path, bundle):
-    source_ref = FileRef(path="source/original.pdf", sha256=_sha(pdf_bytes(1)))
+    source_ref = FileRef(path="/input/source.pdf", sha256=_sha(pdf_bytes(1)))
     return decode_archive(source_ref, path, bundle, Limits())
 
 
@@ -52,4 +52,4 @@ def exported_rows(parsed, source, source_type):
     _, mappings = render_markdown(parsed)
     chunks = make_chunks(parsed, mappings, Config())
     identity = SourceIdentity(document_id="test", name="document", uri=source.path)
-    return list(export_chunks(chunks, parsed, source=source, source_type=source_type, identity=identity, resources={}))
+    return list(export_chunks(chunks, parsed, source=source, source_type=source_type, identity=identity, asset_digests={}))

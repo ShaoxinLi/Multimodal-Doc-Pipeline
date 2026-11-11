@@ -101,13 +101,6 @@ def line_ends(text: str) -> list[int]:
     return [match.end() for match in NEWLINE.finditer(text)]
 
 
-def line_window(text: str, starts: list[int], first: int, last: int) -> str:
-    if not 1 <= first <= last <= len(starts):
-        raise ValueError("line range outside content")
-    end = starts[last] if last < len(starts) else len(text)
-    return text[starts[first - 1]:end]
-
-
 def line_range(ends: list[int], start: int, end: int) -> tuple[int, int]:
     return bisect_right(ends, start) + 1, bisect_right(ends, max(start, end - 1)) + 1
 

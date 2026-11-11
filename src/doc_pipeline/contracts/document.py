@@ -139,8 +139,6 @@ class ParsedContent(Model):
     parse_status: Literal["complete", "partial"] = "complete"
     diagnostics: list[str] = Field(default_factory=list)
     pdf_pages: list[PdfPageMapping] = Field(default_factory=list)
-    native_members: dict[str, str] = Field(default_factory=dict)
-    native_profile: dict[str, str] = Field(default_factory=dict)
 
 
 @dataclass(frozen=True)

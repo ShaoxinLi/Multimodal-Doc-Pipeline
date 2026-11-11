@@ -23,7 +23,7 @@ uv run doc-pipeline path/to/document --out path/to/output
 
 首次运行可选择[支持的文本格式](#支持的格式)，无需凭据。处理 PDF、Office 或图像文件前，请先[设置 MinerU key](#配置-mineru)。
 
-命令会打印 JSON 报告，并生成含原件快照、Markdown 和 chunk 的产物。默认不启用嵌入，因此 `embeddings.jsonl` 为空。
+命令会打印 JSON 报告，并生成 Markdown、chunk、嵌入向量、运行报告及引用的媒体资源。默认不启用嵌入，因此 `embeddings.jsonl` 为空。
 
 查看结果：
 
@@ -222,10 +222,6 @@ report = process_file(
 
 | 文件 | 内容 |
 | --- | --- |
-| `document.json` | 产物清单和内容摘要 |
-| `source/` | 原件及显式资源快照 |
-| `blocks.jsonl`、`provenance.jsonl` | 块映射及 chunk 详细证据 |
-| `native/` | 远程解析的 MinerU ZIP 和保留的服务端证据 |
 | `content.md` | 解析后的 Markdown 文档 |
 | `chunks.jsonl` | 包含章节上下文、元数据和来源引用的分块 |
 | `embeddings.jsonl` | 成功生成的嵌入向量，未启用嵌入时为空 |
@@ -233,7 +229,7 @@ report = process_file(
 | `assets/` | 资源快照，仅在有资源时生成 |
 | `run.json` | 批量任务中各文件的结果和报告路径 |
 
-使用 `Artifact.open(output, expected_id=report["artifact_id"])` 校验产物并读取 chunk、上下文、证据、原件字节和媒体。有关产物结构和字段定义，参见[输出格式](docs/output-format.md)。
+根据 `citations.content_ranges` 读取 `content.md` 中的周边上下文。chunk 中的媒体路径相对于输出目录。字段定义参见[输出格式](docs/output-format.md)。
 
 ### 检查失败或不完整的结果
 

@@ -63,7 +63,6 @@ def test_provider_indices_match_vectors_to_inputs_out_of_order(tmp_path, config)
         {
             "chunk_id": chunk["id"],
             "vector": vector,
-            "artifact_id": chunk["artifact_id"],
             "input_sha256": hashlib.sha256(chunk["embedding_input"].encode()).hexdigest(),
             "profile": {"model": "embed-test", "dimensions": 2, "requested_dimensions": 2,
                         "encoding_format": "float",

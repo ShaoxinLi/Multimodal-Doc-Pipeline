@@ -18,7 +18,6 @@ from doc_pipeline.parsers.multimodal.pdf_evidence import (
     page_correspondence,
     pdf_page_frames,
 )
-from doc_pipeline.services.io import write_bytes
 
 _CONTENT_LIST_NAME = "content_list_v2.json"
 _XML_LIMIT = 20_000_000
@@ -91,13 +90,10 @@ def decode_archive(
 
         diagnostics = []
         source_type = source_type or Path(source_ref.path).suffix.lower().lstrip(".")
-        native_members = {"content_list": member}
-        native_profile = {}
         pdf_pages, office = [], {}
         if original_path is not None and source_type in {"pptx", "xlsx"}:
             origins = [name for name in names if PurePosixPath(name).name.endswith(f"_origin.{source_type}")]
             if len(origins) == 1:
-                native_members["origin"] = origins[0]
                 if hashlib.sha256(archive.read(origins[0])).hexdigest() == source_ref.sha256:
                     office = office_locations(original_path, source_type, groups, source_ref)
                 else:
@@ -108,19 +104,16 @@ def decode_archive(
         frames = []
         candidates = [name for name in names if PurePosixPath(name).name.endswith("_origin.pdf")]
         if len(candidates) == 1:
-            native_members["provider_pdf"] = candidates[0]
             pdf = archive.read(candidates[0])
             digest = hashlib.sha256(pdf).hexdigest()
             if original_path is not None and source_type == "pdf":
-                pdf_pages, native_profile = page_correspondence(original_path, pdf, identical=digest == source_ref.sha256)
+                pdf_pages = page_correspondence(original_path, pdf, identical=digest == source_ref.sha256)
             frames = pdf_page_frames(pdf)
             if frames:
                 if source_type == "pdf" and digest == source_ref.sha256:
                     pdf_ref = source_ref
                 else:
-                    pdf_ref = FileRef(path="native/provider.pdf", sha256=digest)
-                    if original_path is not None:
-                        write_bytes(output_dir / pdf_ref.path, pdf)
+                    pdf_ref = FileRef(path=candidates[0], sha256=digest)
             else:
                 diagnostics.append("mineru_invalid_provider_pdf")
         elif len(candidates) > 1:
@@ -129,15 +122,10 @@ def decode_archive(
         layout = None
         optional = _optional_member(names, PurePosixPath(member).parent, "layout.json", diagnostics)
         if optional is not None:
-            native_members["layout"] = optional
             try:
                 layout = _load_json(archive.read(optional))
                 if not isinstance(layout, dict) or not isinstance(layout.get("pdf_info"), list):
                     raise ValueError("expected layout object with page list")
-                for key in ("_version_name", "_backend"):
-                    value = layout.get(key)
-                    if isinstance(value, str):
-                        native_profile[key.removeprefix("_")] = value
             except (ValueError, RecursionError):
                 diagnostics.append("mineru_invalid_layout")
         else:
@@ -184,8 +172,6 @@ def decode_archive(
         parse_status="partial" if any(isinstance(block.payload, Opaque) for block in blocks) else "complete",
         diagnostics=[*diagnostics, *decoder.diagnostics],
         pdf_pages=pdf_pages,
-        native_members=native_members,
-        native_profile=native_profile,
     )
 
 

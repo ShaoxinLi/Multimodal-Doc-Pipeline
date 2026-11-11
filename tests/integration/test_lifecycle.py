@@ -1,11 +1,16 @@
+import errno
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from threading import Event
 from zipfile import ZipFile
 
 import httpx
 import pytest
 
-from doc_pipeline import Artifact, ArtifactError, Config, PipelineError, process_file
+from doc_pipeline import Config, PipelineError, process_file
+from doc_pipeline.services import io
 from tests.support import document_archive, pdf_bytes, read_output, write_source_pdf
 
 
@@ -78,8 +83,19 @@ def config(monkeypatch):
 
 @pytest.mark.parametrize("converted", [False, True], ids=["source-pdf", "converted-office-pdf"])
 def test_multimodal_citations_target_the_original_file_and_transfers_are_credential_free(
-    tmp_path, config, converted
+    tmp_path, config, converted, monkeypatch
 ):
+    from doc_pipeline.parsers.multimodal import parser
+
+    decoded = []
+    decode = parser.decode_archive
+
+    def observe(*args, **kwargs):
+        result = decode(*args, **kwargs)
+        decoded.append(result)
+        return result
+
+    monkeypatch.setattr(parser, "decode_archive", observe)
     pdf = pdf_bytes()
     if converted:
         source = tmp_path / "input.docx"
@@ -110,20 +126,18 @@ def test_multimodal_citations_target_the_original_file_and_transfers_are_credent
     assert report["chunk_count"] == len(chunks) > 0
     assert vectors == []
     assert "Pipeline probe section 1" in (output / "content.md").read_text()
-    artifact = Artifact.open(output, expected_id=report["artifact_id"])
-    assert artifact.source() == source.read_bytes()
-    assert (output / "native/mineru.zip").read_bytes() == provider.archive
-    selections = [item for chunk in chunks for item in artifact.evidence(chunk["id"])[0].selections]
-    locations = [location for selection in selections for location in selection.locations]
+    [parsed] = decoded
+    locations = [location for block in parsed.blocks for location in block.locations]
+    assert {path.name for path in output.iterdir()} == {"content.md", "chunks.jsonl", "embeddings.jsonl", "report.json"}
+    assert all(chunk["citations"]["source_uri"] == source.resolve().as_uri() for chunk in chunks)
     if converted:
-        assert {(location.kind, location.path) for location in locations} == {("pdf", "native/provider.pdf")}
-        assert (output / "native/provider.pdf").read_bytes() == pdf
+        assert {location.source.path for location in locations} == {"result_origin.pdf"}
         assert all(chunk["citations"]["pages"] is None for chunk in chunks)
         assert all(chunk["citations"]["location_status"] == "unavailable" for chunk in chunks)
     else:
-        assert {(location.kind, location.path) for location in locations} == {("pdf", "source/original.pdf")}
+        assert {location.source.path for location in locations} == {str(source.resolve())}
         assert {location.page_index for location in locations} >= {0, 1}
-        assert {page.basis for page in artifact.manifest.pdf_pages} == {"identical_bytes"}
+        assert {page.basis for page in parsed.pdf_pages} == {"identical_bytes"}
     assert all(chunk["metadata"]["source_sha256"] == report["source"]["sha256"] for chunk in chunks)
     for location in locations:
         x1, y1, x2, y2 = location.bbox
@@ -154,7 +168,7 @@ def test_multimodal_render_failure_leaves_no_converted_pdf(tmp_path, config, mon
     def fail_render(parsed):
         locations = [location for block in parsed.blocks for location in block.locations if location.kind == "pdf_region"]
         assert {location.page_index for location in locations} == {0, 1}
-        assert all(location.source.path == "native/provider.pdf" for location in locations)
+        assert all(location.source.path == "result_origin.pdf" for location in locations)
         raise PipelineError("render", "test_render_failure")
 
     monkeypatch.setattr(pipeline, "render_markdown", fail_render)
@@ -247,20 +261,6 @@ def test_configured_mineru_deadline_stops_polling(tmp_path, monkeypatch):
     assert len(polls) == 1 and elapsed[0] == 1
 
 
-@pytest.mark.parametrize("file", ["native/mineru.zip", "native/provider.pdf"])
-def test_native_files_are_verified(tmp_path, config, file):
-    source = write_source_pdf(tmp_path)
-    output = tmp_path / "out"
-    provider = DocumentService(source, document_archive(pdf_bytes()))
-    with httpx.Client(transport=httpx.MockTransport(provider.handle)) as client:
-        process_file(source, output, config, client=client)
-    Artifact.open(output)
-    path = output / file
-    path.write_bytes(path.read_bytes() + b"corruption")
-    with pytest.raises(ArtifactError, match="checksum"):
-        Artifact.open(output)
-
-
 def test_remote_upload_uses_the_capture_even_when_input_changes(tmp_path, config):
     source = write_source_pdf(tmp_path)
     original = source.read_bytes()
@@ -282,4 +282,177 @@ def test_remote_upload_uses_the_capture_even_when_input_changes(tmp_path, config
 
     with httpx.Client(transport=httpx.MockTransport(handle)) as client:
         process_file(source, output, config, client=client, on_progress=mutate)
-    assert Artifact.open(output).source() == original
+    report, chunks, _ = read_output(output)
+    assert report["source"]["sha256"] == hashlib.sha256(original).hexdigest()
+    assert all(chunk["metadata"]["source_sha256"] == report["source"]["sha256"] for chunk in chunks)
+
+
+def test_fatal_embedding_failure_leaves_no_completed_output(tmp_path):
+    source = tmp_path / "source.txt"
+    source.write_text("Keep the parsed text.")
+    root = tmp_path / "out"
+    config = Config(embedding={"model": "alpha", "api_base_url": "https://provider.test"})
+
+    def fail_embedding(event):
+        if event.stage == "embedding":
+            raise OSError("injected failure before publication")
+
+    with pytest.raises(OSError, match="before publication"):
+        process_file(source, root, config, on_progress=fail_embedding)
+    assert not root.exists()
+    assert not list(tmp_path.glob(".doc-pipeline-*"))
+
+
+def test_concurrent_publishers_cannot_share_destination(tmp_path):
+    path = tmp_path / "guide.md"
+    path.write_text("Body.")
+    root = tmp_path / "out"
+    entered, release = Event(), Event()
+
+    def pause(event):
+        if event.stage == "parse":
+            entered.set()
+            assert release.wait(5)
+
+    with ThreadPoolExecutor() as pool:
+        first = pool.submit(process_file, path, root, on_progress=pause)
+        try:
+            assert entered.wait(5)
+            assert not (root / "report.json").exists()
+            with pytest.raises(PipelineError, match="output_in_use"):
+                process_file(path, root)
+        finally:
+            release.set()
+        first.result()
+    assert read_output(root)[1][0]["body"] == "Body."
+
+
+@pytest.mark.parametrize("existing", [False, True], ids=["fresh-fallback", "existing-mount"])
+@pytest.mark.parametrize("failure", [None, "move", "report"])
+def test_directory_install_preserves_inode_and_publishes_report_last(tmp_path, monkeypatch, existing, failure):
+    source = tmp_path / "guide.md"
+    source.write_text("Body.")
+    output = tmp_path / "out"
+    if existing:
+        output.mkdir()
+    inode = []
+    original_rename, original_move = Path.rename, io.shutil.move
+
+    def rename(path, target):
+        if target == output:
+            assert not existing
+            inode.append(output.stat().st_ino)
+            raise OSError(errno.EBUSY, "mounted")
+        if target == output / "report.json":
+            assert {entry.name for entry in output.iterdir() if not entry.name.startswith(".")} == {
+                "content.md", "chunks.jsonl", "embeddings.jsonl",
+            }
+            if failure == "report":
+                raise OSError("injected report failure")
+        return original_rename(path, target)
+
+    def move(path, target):
+        assert not (output / "report.json").exists()
+        if failure == "move" and path.name == "chunks.jsonl":
+            raise OSError("injected move failure")
+        return original_move(path, target)
+
+    if existing:
+        inode.append(output.stat().st_ino)
+    monkeypatch.setattr(Path, "rename", rename)
+    monkeypatch.setattr(io.shutil, "move", move)
+    if failure:
+        with pytest.raises(OSError, match=f"injected {failure} failure"):
+            process_file(source, output)
+        assert list(output.iterdir()) == [] if existing else not output.exists()
+    else:
+        process_file(source, output)
+        assert output.stat().st_ino == inode[0]
+        assert read_output(output)[1][0]["body"] == "Body."
+    assert not list(tmp_path.glob(".doc-pipeline-*"))
+
+
+def test_fresh_directory_rename_publishes_all_outputs_as_last_operation(tmp_path, monkeypatch):
+    source = tmp_path / "guide.txt"
+    source.write_text("Body.")
+    output = tmp_path / "out"
+    original_rename = Path.rename
+    published = []
+
+    def rename(path, target):
+        if target == output:
+            assert list(output.iterdir()) == []
+            assert {entry.name for entry in path.iterdir()} == {
+                "content.md", "chunks.jsonl", "embeddings.jsonl", "report.json",
+            }
+            assert not path.samefile(output)
+            published.append(True)
+        return original_rename(path, target)
+
+    monkeypatch.setattr(Path, "rename", rename)
+    process_file(source, output)
+    assert published == [True]
+    assert read_output(output)[0]["chunk_count"] == 1
+    assert not list(tmp_path.glob(".doc-pipeline-*"))
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_late_destination_collision_does_not_overwrite_user_files(tmp_path, existing):
+    source = tmp_path / "guide.txt"
+    source.write_text("Body.")
+    output = tmp_path / "out"
+    if existing:
+        output.mkdir()
+
+    def collide(event):
+        if event.stage == "parse":
+            (output / "content.md").write_text("caller content")
+
+    with pytest.raises((OSError, PipelineError)):
+        process_file(source, output, on_progress=collide)
+    assert (output / "content.md").read_text() == "caller content"
+    assert list(output.iterdir()) == [output / "content.md"]
+
+
+@pytest.mark.parametrize("name", [".report.json.tmp", "report.json", "content.md"])
+def test_install_does_not_replace_late_caller_symlinks(tmp_path, name):
+    source = tmp_path / "guide.txt"
+    source.write_text("Body.")
+    output = tmp_path / "out"
+    output.mkdir()
+    caller = tmp_path / "caller"
+
+    def collide(event):
+        if event.stage == "parse":
+            (output / name).symlink_to(caller)
+
+    with pytest.raises((OSError, PipelineError)):
+        process_file(source, output, on_progress=collide)
+    assert (output / name).is_symlink()
+    assert not caller.exists()
+    assert list(output.iterdir()) == [output / name]
+
+
+@pytest.mark.parametrize("file", ["embeddings.jsonl", "report.json"])
+@pytest.mark.parametrize("existing", [False, True])
+def test_prepublication_write_failure_leaves_no_output(tmp_path, monkeypatch, file, existing):
+    from doc_pipeline import pipeline
+
+    source = tmp_path / "guide.txt"
+    source.write_text("Body.")
+    output = tmp_path / "out"
+    if existing:
+        output.mkdir()
+    original = pipeline.write_jsonl if file.endswith("jsonl") else pipeline._write_record
+
+    def fail(path, rows):
+        if path.name == file:
+            path.write_bytes(b"partial")
+            raise OSError("injected write failure")
+        return original(path, rows)
+
+    monkeypatch.setattr(pipeline, "write_jsonl" if file.endswith("jsonl") else "_write_record", fail)
+    with pytest.raises(OSError, match="injected write failure"):
+        process_file(source, output)
+    assert list(output.iterdir()) == [] if existing else not output.exists()
+    assert not list(tmp_path.glob(".doc-pipeline-*"))

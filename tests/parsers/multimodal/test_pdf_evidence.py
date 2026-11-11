@@ -79,7 +79,7 @@ def test_verified_converted_geometry_stays_in_memory(tmp_path):
     provider = _pdf()
     block = _decode(tmp_path, node, layout, provider=provider).blocks[0]
     region = block.locations[0]
-    assert region.source.path == "native/provider.pdf"
+    assert region.source.path == "result_origin.pdf"
     assert region.source.sha256 == hashlib.sha256(provider).hexdigest()
     assert region.page_index == 0
     assert region.bbox == (0, 0, 50, 10)
@@ -374,7 +374,7 @@ def test_converted_geometry_preserves_chunk_boundaries_across_pages(tmp_path):
     source_path = tmp_path / "input.pdf"
     source = FileRef(path=str(source_path), sha256=hashlib.sha256(source_path.read_bytes()).hexdigest())
     identity = SourceIdentity(document_id="test", name=source_path.name, uri=source.path)
-    rows = list(export_chunks(chunks, converted, source=source, source_type="pdf", identity=identity, resources={}))
+    rows = list(export_chunks(chunks, converted, source=source, source_type="pdf", identity=identity, asset_digests={}))
 
     assert [row.body for row in rows] == [lead_text, formula]
     assert [(row.id, row.body, row.embedding_input) for row in rows] == [
@@ -543,12 +543,11 @@ def test_pdf_renderer_catches_changed_resources_and_swapped_pages(tmp_path):
         assert [page.get_contents().get_data() for page in PdfReader(BytesIO(candidate)).pages] == [
             page.get_contents().get_data() for page in PdfReader(BytesIO(original)).pages
         ]
-    mappings, profile = page_correspondence(path, rewritten, identical=False)
+    mappings = page_correspondence(path, rewritten, identical=False)
     assert [row.basis for row in mappings] == ["equivalent_page", "equivalent_page"]
-    assert profile["renderer"].startswith("pypdfium2/")
-    mappings, _ = page_correspondence(path, changed, identical=False)
+    mappings = page_correspondence(path, changed, identical=False)
     assert [row.reason for row in mappings] == ["page_render_mismatch", None]
-    mappings, _ = page_correspondence(path, swapped, identical=False)
+    mappings = page_correspondence(path, swapped, identical=False)
     assert [row.basis for row in mappings] == ["unmapped", "unmapped"]
 
 
@@ -556,12 +555,12 @@ def test_pdf_original_labels_and_render_limits(tmp_path):
     path = tmp_path / "input.pdf"
     data = _colored_pdf(["1 0 0"] * 3, labels=True)
     path.write_bytes(data)
-    mapped, _ = page_correspondence(path, data, identical=True)
+    mapped = page_correspondence(path, data, identical=True)
     assert [(p.number, p.label, p.basis) for p in mapped] == [
         (1, "i", "identical_bytes"), (2, None, "identical_bytes"), (3, "A-1", "identical_bytes"),
     ]
     path.write_bytes(_colored_pdf(["1 0 0"], oversized=True))
-    mapped, _ = page_correspondence(path, _colored_pdf(["1 0 0"], title="rewrite", oversized=True), identical=False)
+    mapped = page_correspondence(path, _colored_pdf(["1 0 0"], title="rewrite", oversized=True), identical=False)
     assert [p.reason for p in mapped] == ["render_size_limit"]
 
 
@@ -570,13 +569,13 @@ def test_rewritten_pdf_original_page_and_converted_bbox_have_distinct_evidence(t
     provider = _colored_pdf(["1 0 0", "0 0 1"], title="rewrite")
     source_path = tmp_path / "source.pdf"
     source_path.write_bytes(original)
-    source = FileRef(path="source/original.pdf", sha256=hashlib.sha256(original).hexdigest())
+    source = FileRef(path=str(source_path.resolve()), sha256=hashlib.sha256(original).hexdigest())
     archive_path = tmp_path / "native.zip"
     archive_path.write_bytes(document_archive(provider))
     parsed = decode_archive(source, archive_path, tmp_path / "artifact", Limits(), original_path=source_path)
     heading = parsed.blocks[0]
     region, page = heading.locations
-    assert region.source.path == "native/provider.pdf"
+    assert region.source.path == "result_origin.pdf"
     assert page.kind == "page" and page.number == 1 and page.source == source
-    assert (tmp_path / "artifact/native/provider.pdf").read_bytes() == provider
+    assert not (tmp_path / "artifact/native").exists()
     assert all(row.citations.pages is None for row in exported_rows(parsed, source, "pdf"))

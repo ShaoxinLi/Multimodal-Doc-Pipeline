@@ -1,40 +1,34 @@
 # Output format
 
-`process_file`, `process_files`, and the CLI write artifacts. Each artifact contains the submitted bytes, parsed content, chunks, and the evidence needed to read them after the input path changes.
+`process_file`, `process_files`, and the CLI write Markdown, chunks, optional vectors, and a processing report.
 
-## Artifact files
+## Output files
 
 | Path | Contents |
 | --- | --- |
-| `document.json` | Final manifest with the artifact ID, chunk hash recipe, producer version, source identity, parse and chunk settings, and file digests. |
-| `source/original.*` | Exact input bytes. |
-| `source/dependencies/` | Captured explicit asset inputs, when supplied. |
 | `content.md` | Readable document rendering. |
-| `blocks.jsonl` | Typed blocks in document order, each with canonical text, a Markdown mapping, and media occurrences. |
-| `provenance.jsonl` | One evidence record per chunk, indexed by chunk ordinal. |
 | `chunks.jsonl` | One compact chunk record per line. |
-| `assets/` | Archived media referenced by blocks. Manifest resource keys resolve to files, byte hashes, and media types. |
-| `native/mineru.zip` | Exact MinerU response archive for remote inputs. The manifest identifies relevant members. |
-| `native/provider.pdf` | Converted PDF when the parser retains a provider PDF coordinate space. |
+| `embeddings.jsonl` | Successful embedding vectors, empty when embedding is disabled. |
+| `report.json` | Per-file processing status, counts, diagnostics, and timings. |
+| `assets/` | Referenced media, when present. Paths are relative to the document output directory. |
 
-JSON and JSONL use UTF-8. Each JSONL record ends with LF. Empty JSONL files contain zero bytes. Artifact paths are relative to the bundle root. Reports and embeddings are separate run outputs. Batch output also includes `run.json`, with per-file artifacts in ordinal directories such as `0001/`.
+JSON and JSONL use UTF-8. Each JSONL record ends with LF. Empty JSONL files contain zero bytes. Batch output also includes `run.json`, with per-file outputs in ordinal directories such as `0001/`.
 
-The pipeline captures and hashes the main input before validation, parsing, and upload. Explicit assets are captured during intake. The local parser captures implicit assets when it discovers references. Capture happens per file.
+The pipeline uses private input captures during processing to keep source hashes and parsed bytes consistent. It does not retain the source document or MinerU response archive in the output. Original-source access belongs to the caller through `citations.source_uri`.
 
-Publication uses a private staging directory and a per-destination lease. For a new destination, the pipeline renames the completed directory into place. For an existing directory, including an output mount, it preserves that directory and installs the manifest last. A reader can open the artifact after publication and before embedding finishes. The writer and verified reader use POSIX filesystem operations on macOS and Linux, including the Docker image.
+Each document is prepared in private staging before publication. The pipeline preserves an existing output directory, including a mounted directory, and installs `report.json` last. Output locking uses POSIX filesystem operations on macOS and Linux, including the Docker image.
 
 ## `chunks.jsonl`
 
-Every row contains all eight fields.
+Every row contains these seven fields in the order shown, starting with `id`.
 
 | Field | Meaning |
 | --- | --- |
-| `artifact_id` | SHA-256 identifier of the artifact that owns this occurrence. |
-| `id` | Zero-based chunk ordinal within that artifact. |
+| `id` | Zero-based chunk ordinal within this document output. |
 | `body` | Text selected from canonical blocks. |
 | `heading_path` | Heading text from outermost to innermost section. |
 | `embedding_input` | Exact prepared text, including retained context, or `null`. |
-| `assets` | Unique manifest resource keys in first body-use order. Empty when the body has no archived media. |
+| `assets` | Unique output-relative media paths in first body-use order, such as `assets/<sha256>.png`. Empty when the body has no archived media. |
 | `citations` | Compact reading and source positions. |
 | `metadata` | Source identity, content fingerprint, and parse classification. |
 
@@ -47,20 +41,20 @@ Every row contains all nine citation fields.
 | Field | Meaning |
 | --- | --- |
 | `source_name` | Ingestion name or the caller-supplied display name. |
-| `source_uri` | Artifact-relative snapshot path by default. The caller can supply an external URI that identifies this exact source version. |
+| `source_uri` | Resolved original input file URI by default. The caller can supply an external URI that identifies this exact source version. |
 | `pages` | Sorted original PDF page positions as `{"number": 1, "label": null}` objects, or `null`. |
 | `slides` | Sorted original slide numbers, or `null`. |
 | `sheets` | Original sheets as `{"name": "Sheet1", "cells": null}` objects, or `null`. |
-| `source_lines` | Original decoded-text line ranges, or `null`. Auxiliary reference definitions remain in evidence. |
+| `source_lines` | Original decoded-text line ranges for the body, or `null`. |
 | `objects` | Body figures, tables, equations, algorithms, and code blocks in selection order. |
 | `content_ranges` | One or more enclosing reading windows in `content.md`. |
 | `location_status` | `known` when original locations cover all body selections at the available granularity, `partial` for some, or `unavailable` for none. |
 
-Page and slide numbers start at one. Both ends of each line range are inclusive and start at one. The pipeline counts CRLF, CR, and LF as line breaks. Source code-point ranges in evidence refer to the decoded original, with its original line endings and any byte order mark preserved by the selected encoding.
+Page and slide numbers start at one. Both ends of each line range are inclusive and start at one. The pipeline counts CRLF, CR, and LF as line breaks.
 
 An object has `kind`, `labels`, `anchors`, `body_range`, and `part`. `labels` contains observed display labels. `anchors` contains machine labels such as TeX labels. `body_range` uses zero-based Unicode code points with an exclusive end. A split table has a `part` of the form `{"table_rows": [start, end]}`. That range uses the normalized table grid, a zero-based start, and an exclusive end. Other objects have `part: null`.
 
-Source positioning uses body selections. Embedding-only ancestor headings, table headers, captions, and footnotes remain in evidence under their respective roles.
+Source positioning describes the chunk body. Context included only in `embedding_input` does not expand the body citations.
 
 ### Metadata
 
@@ -75,41 +69,41 @@ Source positioning uses body selections. Embedding-only ancestor headings, table
 
 If your source system tracks document IDs and revisions, supply `SourceIdentity` to `process_file` or set it on each batch `InputFile`.
 
-### Original-source evidence
+### Original-source positions
 
-PDF bounding boxes come from verified MinerU content and layout matches. When MinerU returns the exact submitted PDF, the boxes refer to the original coordinate space. For a rewritten PDF, page correspondence requires equal page counts, equal decoded content streams for that page, and equal PDFium renders at 72 and 144 DPI with annotations and form widgets enabled. The manifest records the comparison basis and failures. The page comparison bounds render size and leaves PDF optional-content configurations unresolved. Corresponding rewritten pages provide page numbers. Their bounding boxes stay in the provider coordinate space. Page labels come from the original PDF's valid page-label tree. Redundant numeric labels become `null`.
+PDF page positions come from verified MinerU content and layout matches. When MinerU returns the submitted PDF unchanged, positions refer to the original directly. For a rewritten PDF, page correspondence requires equal page counts, equal decoded content streams for that page, and equal PDFium renders at 72 and 144 DPI with annotations and form widgets enabled. The comparison bounds render size and leaves optional-content configurations unresolved. Page labels come from the original PDF's valid page-label tree. Redundant numeric labels become `null`.
 
-PPTX positioning requires an identical retained origin, equal slide and group counts, and a unique match of nested text to the slide at the same ordinal. XLSX positioning requires an identical retained origin and equal sheet and group counts. A single sheet or a uniquely matching sheet title supplies the sheet name. Cell coordinates stay `null`. DOC, PPT, and XLS retain available provider evidence.
+PPTX positioning requires a byte-identical origin in the provider response, equal slide and group counts, and a unique match of nested text to the slide at the same ordinal. XLSX positioning requires a byte-identical origin and equal sheet and group counts. A single sheet or a uniquely matching sheet title supplies the sheet name. Cell coordinates stay `null`. Unverified original positions remain unavailable.
 
-### Hash recipes
+### Chunk fingerprint
 
-The chunk fingerprint uses SHA-256 of a JSON object with exactly `body`, `heading_path`, `embedding_input`, and `content_assets`. `content_assets` holds the SHA-256 of each resolved body media use in selection order, including repetitions. Unresolved media stays in evidence. A fingerprint describes only the available media bytes.
+The chunk fingerprint uses SHA-256 of a JSON object with exactly `body`, `heading_path`, `embedding_input`, and `content_assets`. `content_assets` holds the SHA-256 of each resolved body media use in selection order, including repetitions. A fingerprint describes only the available media bytes.
 
-Canonical JSON uses sorted keys, compact separators, UTF-8, literal Unicode, and no trailing newline for a single value. It preserves string contents. The artifact ID is SHA-256 of canonical `document.json` with only `artifact_id` removed. Its `files` map covers full bytes of the listed files. `chunk_rows_sha256` covers canonical JSONL rows with only `artifact_id` removed from each row. The reader checks the canonical chunk bytes and each row's `artifact_id` as well.
-
-The artifact ID covers the retained native archive. A provider rerun can change the ID even when the displayed content and chunk fingerprints agree. The embedding profile and run timing are outside the artifact identity.
+Hash computation uses sorted keys, compact separators, UTF-8, literal Unicode, and no trailing newline. It preserves string contents. This canonical ordering applies only to the hash input. The exported JSONL follows the field order above. Source identity, citation positions, and chunk ordinal are outside the chunk fingerprint.
 
 ### Generated example
 
 Run this Python example in a directory where `example-output` is absent or empty.
 
 ```python
+import json
 from pathlib import Path
 
-from doc_pipeline import Artifact, SourceIdentity, process_file
+from doc_pipeline import SourceIdentity, process_file
 
 source = Path("example.txt")
 source.write_bytes(b"Hello world.\n")
 output = Path("example-output")
 identity = SourceIdentity(document_id="examples/hello", version="v1")
 report = process_file(source, output, identity=identity)
-artifact = Artifact.open(output, expected_id=report["artifact_id"])
-print(artifact.chunk(0).model_dump_json(indent=2))
+row = json.loads((output / "chunks.jsonl").read_text(encoding="utf-8").splitlines()[0])
+print(json.dumps(row, ensure_ascii=False, indent=2))
 ```
+
+The `source_uri` below illustrates the absolute file URI. Its directory depends on where you run the example.
 
 ```json
 {
-  "artifact_id": "18d091a301a187d9bec35c4f990ee587ab3f91a0bff7228c8d6f3bcf4d367a7a",
   "id": 0,
   "body": "Hello world.",
   "heading_path": [],
@@ -117,7 +111,7 @@ print(artifact.chunk(0).model_dump_json(indent=2))
   "assets": [],
   "citations": {
     "source_name": "example.txt",
-    "source_uri": "source/original.txt",
+    "source_uri": "file:///absolute/path/to/example.txt",
     "pages": null,
     "slides": null,
     "sheets": null,
@@ -137,26 +131,15 @@ print(artifact.chunk(0).model_dump_json(indent=2))
 }
 ```
 
-## Verified reads
+## Read surrounding context
 
-Open an artifact by its directory. Pass an expected ID when the caller already has a chunk reference.
+`citations.content_ranges` identifies inclusive, one-based line windows in `content.md`. Read those windows, expand them for surrounding context, or read the entire file. Adjacent chunk IDs identify neighboring chunks within the same output. Resolve each `assets` entry against that output directory.
 
-```python
-row = artifact.chunk(0)
-nearby = artifact.neighbors(row.id, radius=2)
-windows = artifact.context(row.id, before=2, after=3)
-selection, blocks = artifact.evidence(row.id)
-original_bytes = artifact.source()
-media_bytes = [artifact.asset(key) for key in row.assets]
-```
-
-`neighbors` returns available neighboring chunks in ordinal order. `context` clips the requested expansion to the rendered document and merges adjacent windows. `content()` returns the complete verified Markdown. `evidence` returns the chunk's selected block ranges and the referenced block records. Each body fragment is the corresponding slice of a block's `canonical_text`. Join the body fragments with two LF characters to reconstruct `body`.
-
-`Artifact.open` raises `ArtifactError` for an incomplete, corrupted, or mismatched bundle. The open reader retains verified chunks, Markdown, and evidence. Source and asset reads verify the bytes they return. An invalid ordinal raises `IndexError`. An unknown resource key raises `KeyError`.
+For the original document, use `citations.source_uri` with `pages`, `slides`, `sheets`, or `source_lines`. The caller owns access to that location and preservation of the source revision. `metadata.source_sha256` identifies the input bytes used for this run.
 
 ## `embeddings.jsonl`
 
-Each successful record contains `artifact_id`, `chunk_id`, `input_sha256`, `profile`, and `vector`. Join `artifact_id` and `chunk_id` to the chunk occurrence. `input_sha256` hashes the exact UTF-8 embedding input. The effective profile includes the model, actual and requested dimensions, encoding format, and a digest of the configured service URL. The vector is an array of finite numbers. The file is empty when embedding is disabled or no vectors succeed.
+Each successful record contains `chunk_id`, `input_sha256`, `profile`, and `vector`. Match `chunk_id` to `id` in the same output directory's `chunks.jsonl`. `input_sha256` hashes the exact UTF-8 embedding input. The effective profile includes the model, actual and requested dimensions, encoding format, and a digest of the configured service URL. The vector is an array of finite numbers. The file is empty when embedding is disabled or no vectors succeed.
 
 ## `report.json`
 
@@ -165,7 +148,6 @@ The single-file API returns the same object that it writes to `report.json`.
 | Field | Meaning |
 | --- | --- |
 | `source` | Resolved intake path and snapshot byte digest for the run report. |
-| `artifact_id` | Identifier of the published artifact. |
 | `parse_status` | `complete` or `partial`. Partial means that the parsed document contains opaque content. |
 | `chunk_count`, `embedding_count` | Number of exported chunks and successful vectors. |
 | `chunking` | Effective `target_input_bytes` and `max_input_bytes`. |
@@ -222,7 +204,7 @@ The three status concepts are independent.
 
 Embedding disabled, an empty document, or missing citation coordinates can still produce `status: "complete"`. A partial document can still contain usable chunks and vectors.
 
-A fatal single-file error raises an exception instead of returning a report. A caught batch file error is recorded in `run.json`. A published artifact remains readable if embeddings or report writing fail. Readers require a finalized, verified `document.json`. Interruption can prevent the final batch report.
+A fatal single-file error raises an exception instead of returning a report. A caught batch file error is recorded in `run.json`. A fatal error before publication leaves no completed document output. Expected embedding errors still produce content and a report, with successful vectors when available. Interruption can prevent the final batch report.
 
 The CLI prints a summary to stdout in a terminal and JSON when stdout is redirected. Use `--format text` or `--format json` to choose the format. Text-mode errors go to stderr. Progress also goes to stderr and appears by default when stderr is a terminal. Use `--progress` or `--no-progress` to override the default.
 
@@ -236,4 +218,4 @@ The CLI prints a summary to stdout in a terminal and JSON when stdout is redirec
 
 `retryable` describes an individual error. It does not mean that a run can resume in its existing output directory. The pipeline requires an empty or nonexistent output directory for each call.
 
-The [artifact contracts](../src/doc_pipeline/contracts/artifact.py) define the serialized fields. The [architecture page](architecture.md) describes how parsing, chunking, and publication fit together.
+The [chunk contracts](../src/doc_pipeline/contracts/chunk.py) define the serialized fields. The [architecture page](architecture.md) describes how parsing, chunking, and publication fit together.

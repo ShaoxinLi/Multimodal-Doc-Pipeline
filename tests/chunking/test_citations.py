@@ -1,6 +1,8 @@
+import uuid
+
 import pytest
 
-from doc_pipeline import Artifact, process_file
+from doc_pipeline import process_file
 from doc_pipeline.chunking.builder import make_chunks
 from doc_pipeline.chunking.citations import Citations, export_chunks
 from doc_pipeline.contracts.chunk import Part, TableRows, TextRange
@@ -29,7 +31,7 @@ def exported(parsed, source=SOURCE, source_type="pdf", chunks=None):
         _, mappings = render_markdown(parsed)
         chunks = make_chunks(parsed, mappings, Config())
     identity = SourceIdentity(document_id="logical-doc", name="display.pdf", uri=source.path)
-    return list(export_chunks(chunks, parsed, source=source, source_type=source_type, identity=identity, resources={}))
+    return list(export_chunks(chunks, parsed, source=source, source_type=source_type, identity=identity, asset_digests={}))
 
 
 def citations(parsed_content):
@@ -129,20 +131,18 @@ def test_native_rows_keep_uniform_nulls_identity_and_exact_citations(tmp_path):
     source.write_text("# Title\n\nParagraph.\n\n<div>Uninterpreted</div>\n")
     process_file(source, tmp_path / "first")
     report, rows, _ = read_output(tmp_path / "first")
-    artifact = Artifact.open(tmp_path / "first")
     for row in rows:
         meta, compact = row["metadata"], row["citations"]
         assert set(meta) == METADATA
-        assert meta["document_id"] == artifact.manifest.source_identity.document_id
+        assert meta["document_id"] == str(uuid.uuid5(uuid.NAMESPACE_URL, source.resolve().as_uri()))
         assert meta["document_version"] is None
         assert compact["pages"] is compact["slides"] is compact["sheets"] is None
         assert compact["location_status"] == "known"
         assert meta["source_sha256"] == report["source"]["sha256"]
         assert row["heading_path"] == ["Title"]
-        selections, blocks = artifact.evidence(row["id"])
-        assert set(selection.block_id for selection in selections.selections) == {block.block.id for block in blocks}
-        assert all(location.path == "source/original.md" for item in selections.selections
-                   for location in item.locations)
+        assert compact["source_uri"] == source.resolve().as_uri()
+        assert compact["source_name"] == source.name
+        assert compact["source_lines"]
     assert {row["metadata"]["content_status"] for row in rows} == {"parsed", "unparsed"}
     source.write_text("# Title\n\nChanged.\n")
     process_file(source, tmp_path / "second")

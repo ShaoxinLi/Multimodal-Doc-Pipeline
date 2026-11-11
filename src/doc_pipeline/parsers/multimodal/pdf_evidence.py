@@ -488,20 +488,17 @@ def _compare(original, converted, left, right, index: int) -> str | None:
 
 
 def page_correspondence(source: Path, provider: bytes, *, identical: bool,
-                        ) -> tuple[list[PdfPageMapping], dict[str, str]]:
+                        ) -> list[PdfPageMapping]:
     try:
         original = PdfReader(source, strict=True)
         count = len(original.pages)
     except _PDF_ERRORS:
-        return [], {}
+        return []
     labels = _labels(original, count)
     if identical:
         return [PdfPageMapping(number=i, label=label, basis="identical_bytes", reason=None)
-                for i, label in enumerate(labels, 1)], {}
+                for i, label in enumerate(labels, 1)]
 
-    profile = {"page_comparison": "decoded_streams_and_rgb_pixels_72_144_dpi",
-               "renderer": f"pypdfium2/{pdfium.PYPDFIUM_INFO}",
-               "pdfium": str(pdfium.PDFIUM_INFO)}
     try:
         converted = PdfReader(BytesIO(provider), strict=True)
         if len(converted.pages) != count:
@@ -527,4 +524,4 @@ def page_correspondence(source: Path, provider: bytes, *, identical: bool,
         reasons = ["pdf_comparison_failed"] * count
     return [PdfPageMapping(number=i, label=label if reason is None else None,
                            basis="equivalent_page" if reason is None else "unmapped", reason=reason)
-            for i, (label, reason) in enumerate(zip(labels, reasons, strict=True), 1)], profile
+            for i, (label, reason) in enumerate(zip(labels, reasons, strict=True), 1)]

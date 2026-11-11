@@ -1,5 +1,6 @@
 import re
 import tempfile
+import uuid
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, nullcontext
@@ -13,18 +14,12 @@ from PIL import Image, UnidentifiedImageError
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
-from doc_pipeline.artifacts.store import (
-    CapturedInput,
-    capture_source,
-    empty_destination,
-    publish,
-    retain_archive,
-    staging_directory,
-)
 from doc_pipeline.chunking.builder import make_chunks
-from doc_pipeline.contracts.artifact import digest
+from doc_pipeline.chunking.citations import digest, export_chunks
 from doc_pipeline.contracts.config import Config, Limits
-from doc_pipeline.contracts.core import InputFile, PipelineError, SourceIdentity
+from doc_pipeline.contracts.core import FileRef, InputFile, PipelineError, SourceIdentity
+from doc_pipeline.contracts.document import Image as DocumentImage
+from doc_pipeline.contracts.document import ParsedContent
 from doc_pipeline.contracts.run import (
     EmbeddingUsage,
     ExecutionRecord,
@@ -35,7 +30,16 @@ from doc_pipeline.contracts.run import (
 from doc_pipeline.parsed_content.md_renderer import render_markdown
 from doc_pipeline.parsers.multimodal.client import ArchiveFailure, ArchiveSuccess, obtain_archives
 from doc_pipeline.services.embeddings import embed_chunks
-from doc_pipeline.services.io import write_json, write_jsonl
+from doc_pipeline.services.io import (
+    capture_file,
+    empty_destination,
+    file_digest,
+    install_output,
+    staging_directory,
+    write_bytes,
+    write_json,
+    write_jsonl,
+)
 
 TEXT_FORMATS = {"md", "markdown", "txt", "rst", "tex", "latex"}
 IMAGE_FORMATS = {"png", "jpg", "jpeg", "jp2", "webp", "gif", "bmp"}
@@ -93,11 +97,41 @@ def validate_source(path: Path, filename: str, limits: Limits) -> str:
 
 
 @dataclass(frozen=True)
+class _CapturedInput:
+    input: InputFile
+    original_path: Path
+    ref: FileRef
+    identity: SourceIdentity
+
+
+def _capture_source(source: InputFile, directory: Path, limits: Limits) -> _CapturedInput:
+    path = source.path
+    if not path.name or "\\" in path.name or path.name in {".", ".."}:
+        raise PipelineError("intake", "invalid_filename")
+    original_path = path.resolve()
+    original = directory / "source" / path.name
+    checksum = capture_file(original_path, original, limits.max_source_bytes, "source_too_large")
+    ref = FileRef(path=str(original_path), sha256=checksum)
+    identity = source.identity or SourceIdentity(document_id=str(uuid.uuid5(uuid.NAMESPACE_URL, original_path.as_uri())))
+    identity = SourceIdentity(
+        document_id=identity.document_id, version=identity.version,
+        uri=identity.uri or original_path.as_uri(), name=identity.name or path.name,
+    )
+    assets = {}
+    for index, (key, asset) in enumerate(sorted(source.assets.items())):
+        target = directory / "dependencies" / str(index)
+        capture_file(asset, target, limits.max_source_bytes, "asset_too_large")
+        assets[key] = target
+    return _CapturedInput(source.model_copy(update={"path": original, "assets": assets}), original_path, ref, identity)
+
+
+@dataclass(frozen=True)
 class _Document:
-    captured: CapturedInput
+    captured: _CapturedInput
     kind: str
     output_dir: Path
     staging: Path
+    preserve_directory: bool
     record: ExecutionRecord
     output_root: Path
 
@@ -110,12 +144,14 @@ def _intake(source: InputFile, output_dir: Path, limits: Limits, record: Executi
         existed = output_dir.exists()
         if existed:
             scope.enter_context(empty_destination(output_dir))
-        staging = scope.enter_context(staging_directory(output_dir))
-        captured = capture_source(source, staging, limits)
+        work = scope.enter_context(staging_directory(output_dir))
+        staging = work / "out"
+        staging.mkdir()
+        captured = _capture_source(source, work / "capture", limits)
         kind = validate_source(captured.input.path, source.path.name, limits)
         if not existed:
             scope.enter_context(empty_destination(output_dir))
-    return _Document(captured, kind, output_dir, staging, record, output_root or output_dir)
+    return _Document(captured, kind, output_dir, staging, existed, record, output_root or output_dir)
 
 
 def _remote_progress(documents: list[_Document], callback: ProgressCallback | None):
@@ -143,8 +179,7 @@ def _finalize(document: _Document, config: Config, client: httpx.Client,
         else:
             from doc_pipeline.parsers.multimodal.parser import decode_archive
 
-            retained = retain_archive(archive, staging, limits)
-            parsed = decode_archive(captured.ref, retained, staging, limits, source_type=document.kind,
+            parsed = decode_archive(captured.ref, archive, staging, limits, source_type=document.kind,
                                     original_path=captured.input.path)
         record.parse_status = parsed.parse_status
     with record.measure("render"):
@@ -153,8 +188,12 @@ def _finalize(document: _Document, config: Config, client: httpx.Client,
         chunks = make_chunks(parsed, mappings, config)
         record.chunk_count = len(chunks)
     with record.measure("write"):
-        manifest = publish(staging, output_dir, captured, document.kind, parsed, markdown, mappings, chunks,
-                           config, remote=archive is not None)
+        asset_digests = _finalize_assets(parsed, staging)
+        write_bytes(staging / "content.md", markdown.encode())
+        write_jsonl(staging / "chunks.jsonl", (chunk.model_dump(mode="json") for chunk in export_chunks(
+            chunks, parsed, source=captured.ref, identity=captured.identity,
+            source_type=document.kind, asset_digests=asset_digests,
+        )))
     vectors, errors = [], []
     if config.embedding is not None:
         with record.measure("embedding"):
@@ -165,7 +204,6 @@ def _finalize(document: _Document, config: Config, client: httpx.Client,
             for vector in vectors:
                 chunk = chunks[vector["chunk_id"]]
                 vector.update(
-                    artifact_id=manifest.artifact_id,
                     input_sha256=digest(chunk.embedding_input.encode()),
                     profile={
                         "model": profile.model, "dimensions": len(vector["vector"]),
@@ -176,10 +214,9 @@ def _finalize(document: _Document, config: Config, client: httpx.Client,
             record.embedding_count = len(vectors)
             record.embedding_error_count = len(errors)
     with record.measure("write"):
-        write_jsonl(output_dir / "embeddings.jsonl", vectors)
+        write_jsonl(staging / "embeddings.jsonl", vectors)
     report = {
         "source": {"path": str(captured.original_path), "sha256": captured.ref.sha256},
-        "artifact_id": manifest.artifact_id,
         "parse_status": parsed.parse_status,
         "chunk_count": record.chunk_count,
         "chunking": config.chunking.model_dump(),
@@ -191,8 +228,28 @@ def _finalize(document: _Document, config: Config, client: httpx.Client,
     record.finish()
     report["execution"] = record.snapshot(config.mineru.parse_options())
     with record.measure("write"):
-        _write_record(output_dir / "report.json", report)
+        _write_record(staging / "report.json", report)
+        install_output(staging, output_dir, preserve_directory=document.preserve_directory)
     return report
+
+
+def _finalize_assets(parsed: ParsedContent, staging: Path) -> dict[str, str]:
+    refs = {
+        use.asset.path: use.asset for use in parsed.inline_assets if use.asset is not None
+    }
+    refs.update({
+        block.payload.asset.path: block.payload.asset for block in parsed.blocks
+        if isinstance(block.payload, DocumentImage) and block.payload.asset is not None
+    })
+    asset_digests = {}
+    for key, ref in refs.items():
+        if file_digest(staging / ref.path) != ref.sha256:
+            raise PipelineError("write", "resource_digest_mismatch")
+        asset_digests[key] = ref.sha256
+    for candidate in (staging / "assets").glob("*"):
+        if candidate.relative_to(staging).as_posix() not in refs:
+            candidate.unlink()
+    return asset_digests
 
 
 def _write_record(path: Path, value: dict) -> None:

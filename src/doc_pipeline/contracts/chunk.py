@@ -1,6 +1,6 @@
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from doc_pipeline.contracts.core import Model, PagePosition, Range, SheetPosition, SlidePosition
 
@@ -79,3 +79,64 @@ class Chunk(Model):
     heading_path: list[str]
     embedding_input: str | None
     citations: list[Citation]
+
+
+Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+Positive = Annotated[int, Field(ge=1)]
+Ordinal = Annotated[int, Field(ge=0)]
+LineRange = tuple[Positive, Positive]
+
+
+class Page(Model):
+    number: Positive
+    label: str | None
+
+
+class Sheet(Model):
+    name: str
+    cells: list[str] | None
+
+
+class TablePart(Model):
+    table_rows: tuple[Ordinal, Ordinal]
+
+
+class ObjectCitation(Model):
+    kind: Literal["table", "figure", "equation", "algorithm", "code"]
+    labels: list[str]
+    anchors: list[str]
+    body_range: tuple[Ordinal, Ordinal]
+    part: TablePart | None
+
+
+class ChunkCitations(Model):
+    source_name: str
+    source_uri: str
+    pages: list[Page] | None
+    slides: list[Positive] | None
+    sheets: list[Sheet] | None
+    source_lines: list[LineRange] | None
+    objects: list[ObjectCitation]
+    content_ranges: list[LineRange]
+    location_status: Literal["known", "partial", "unavailable"]
+
+
+class ChunkMetadata(Model):
+    document_id: str
+    document_version: str | None
+    source_sha256: Sha256
+    chunk_sha256: Sha256
+    source_type: str
+    content_status: Literal["parsed", "partial", "unparsed"]
+
+
+class ExportedChunk(Model):
+    model_config = ConfigDict(strict=True)
+
+    id: Ordinal
+    body: str
+    heading_path: list[str]
+    embedding_input: str | None
+    assets: list[str]
+    citations: ChunkCitations
+    metadata: ChunkMetadata
