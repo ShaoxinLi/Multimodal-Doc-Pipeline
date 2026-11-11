@@ -70,6 +70,8 @@ docker run --rm --user "$(id -u):$(id -g)" \
 
 输入目录以只读方式挂载。输出目录必须为空，且当前用户可写。如需传入 API key 和配置文件，使用下方的[完整 Docker 配置示例](#配置-docker)。
 
+在 Docker 中查看进度和摘要时，在输入路径后加上 `--progress --format text`。默认格式见 [CLI 输出说明](docs/output-format.md#status-and-failure-semantics)。
+
 ## 支持的格式
 
 | 输入 | 扩展名 | 处理方式 |
@@ -205,6 +207,16 @@ print(report["status"])
 ```
 
 `process_file` 也接受同一个 `config` 对象作为第三个参数。
+
+两个函数都接受 `on_progress`，回调会收到包含文件和当前阶段的 `ProgressEvent`。批量处理的回调可能在工作线程中运行，请同步对共享状态的写入。
+
+```python
+report = process_file(
+	Path("path/to/document"),
+	Path("path/to/output"),
+	on_progress=lambda event: print(event.path.name, event.stage),
+)
+```
 
 ## 输出
 

@@ -1,4 +1,5 @@
 import math
+from collections.abc import Callable
 
 from doc_pipeline.contracts.chunk import Chunk
 from doc_pipeline.contracts.config import Config, EmbeddingConfig, api_key
@@ -34,7 +35,9 @@ def validate_vectors(value, size: int, profile: EmbeddingConfig,
     return [ordered[index] for index in range(size)]
 
 
-def embed_chunks(chunks: list[Chunk], config: Config, client) -> tuple[list[dict], list[dict], EmbeddingUsage]:
+def embed_chunks(chunks: list[Chunk], config: Config, client, *,
+                 on_progress: Callable[[int, int, int], None] | None = None
+                 ) -> tuple[list[dict], list[dict], EmbeddingUsage]:
     usage = EmbeddingUsage()
     profile = config.embedding
     if profile is None:
@@ -77,6 +80,11 @@ def embed_chunks(chunks: list[Chunk], config: Config, client) -> tuple[list[dict
         vectors.extend({"chunk_id": chunk.id, "vector": value}
                        for chunk, value in zip(batch, values, strict=True))
 
+    total = len(eligible) + len(errors)
+    if on_progress is not None:
+        on_progress(len(errors), total, len(errors))
     for index in range(0, len(eligible), 10):
         request_batch(eligible[index:index + 10])
+        if on_progress is not None:
+            on_progress(len(vectors) + len(errors), total, len(errors))
     return vectors, errors, usage

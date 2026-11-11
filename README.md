@@ -70,6 +70,8 @@ docker run --rm --user "$(id -u):$(id -g)" \
 
 The input mount is read-only. The output directory must be empty and writable by your user. To pass API keys and a configuration file, use the [complete Docker configuration examples](#configure-docker).
 
+To show progress and a summary in Docker, add `--progress --format text` after the input path. See [CLI output](docs/output-format.md#status-and-failure-semantics) for format defaults.
+
 ## Supported formats
 
 | Input | Extensions | Processing |
@@ -205,6 +207,16 @@ print(report["status"])
 ```
 
 `process_file` accepts the same `config` object as its third argument.
+
+Pass `on_progress` to either function to receive a `ProgressEvent` with the file and current stage. Batch callbacks can run on worker threads. Synchronize writes to shared state.
+
+```python
+report = process_file(
+	Path("path/to/document"),
+	Path("path/to/output"),
+	on_progress=lambda event: print(event.path.name, event.stage),
+)
+```
 
 ## Outputs
 

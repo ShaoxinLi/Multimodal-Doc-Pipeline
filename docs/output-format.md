@@ -212,7 +212,7 @@ Embedding disabled, an empty document, or missing citation coordinates can still
 
 A fatal single-file error raises an exception instead of returning a report. A caught batch file error is recorded in `run.json`. Earlier assets or data files can remain after failure, so their presence alone does not establish success. Reports use atomic replacement, but the output directory as a whole does not. Interruption or a failure outside per-file processing can prevent the final batch report.
 
-The CLI emits its result or error as JSON on stdout and logs execution events to stderr.
+The CLI prints a summary to stdout in a terminal and JSON when stdout is redirected. Use `--format text` or `--format json` to choose the format. Text-mode errors go to stderr. Progress also goes to stderr and appears by default when stderr is a terminal. Use `--progress` or `--no-progress` to override the default.
 
 | Exit code | Meaning |
 | --- | --- |
@@ -220,7 +220,7 @@ The CLI emits its result or error as JSON on stdout and logs execution events to
 | `65` | Non-retryable fatal error, or invalid configuration or input. In a batch, any non-retryable fatal file error takes precedence. |
 | `75` | Retryable fatal error or any embedding error, including embedding errors whose own `retryable` field is false. |
 | `130` | Interrupted execution, including SIGINT and SIGTERM. |
-| `2` | Invalid CLI arguments reported by the argument parser. This path prints usage rather than a JSON result. |
+| `2` | Invalid CLI arguments reported by the argument parser. The argument parser prints usage to stderr. |
 
 `retryable` describes an individual error. It does not mean that a run can resume in its existing output directory. The pipeline requires an empty or nonexistent output directory for each call.
 

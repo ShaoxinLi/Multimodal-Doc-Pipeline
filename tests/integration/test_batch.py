@@ -73,14 +73,14 @@ class BatchService:
         return ok(extract_result=self.poll(self))
 
 
-def run_batch(paths, output, provider, **overrides):
+def run_batch(paths, output, provider, *, on_progress=None, **overrides):
     config = Config(request_timeout_seconds=12, mineru={
         "api_base_url": "https://mineru.test", "api_key": "mineru-secret", **overrides,
     })
     with httpx.Client(transport=httpx.MockTransport(provider.handle),
                       auth=("default-user", "default-key"), cookies={"default": "default-cookie"},
                       headers={"X-Default": "default"}, params={"client_default": "default"}) as http:
-        run = process_files(paths, output, config, client=http)
+        run = process_files(paths, output, config, client=http, on_progress=on_progress)
         assert not http.is_closed
     assert json.loads((output / "run.json").read_text()) == run
     return run
@@ -109,9 +109,19 @@ def test_mixed_batch_uses_one_shared_poll_and_retains_order_and_progress(tmp_pat
 
     service = BatchService(poll=poll)
     output = tmp_path / "out"
+    progress = []
     run = run_batch([first, InputFile(path=note, encoding="latin-1"), second, first], output, service,
                     model_version="pipeline", is_ocr=True, enable_formula=False, enable_table=False,
-                    language="en")
+                    language="en", on_progress=progress.append)
+    for index, path in ((0, first), (2, second)):
+        updates = [event for event in progress if event.index == index]
+        assert all(event.path == path for event in updates)
+        assert updates[0].stage == "intake"
+        assert updates[-1].stage == "complete"
+        assert any(event.stage == "remote_parse" and (event.completed, event.total) == (1, 2)
+                   for event in updates)
+        assert any(event.stage == "download" for event in updates)
+    assert [event.stage for event in progress if event.index == 1] == ["intake", "parse", "complete"]
     [payload] = service.payloads
     assert {name: payload[name] for name in payload if name != "files"} == {
         "model_version": "pipeline", "enable_formula": False, "enable_table": False, "language": "en",
@@ -406,7 +416,7 @@ def test_interrupted_batch_finishes_running_local_work_and_cancels_queue(tmp_pat
             assert release.wait(timeout=10)
         return original_parse(source, *args, **kwargs)
 
-    def interrupt(*args):
+    def interrupt(*args, **kwargs):
         assert entered.wait(timeout=10)
         raise KeyboardInterrupt
 

@@ -2,12 +2,32 @@ import json
 import logging
 import time
 import uuid
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Literal
 
 from doc_pipeline.contracts.core import PipelineError
+
+ProgressStage = Literal[
+    "intake", "upload", "remote_parse", "download", "parse", "embedding",
+    "complete", "partial", "failed",
+]
+
+
+@dataclass(frozen=True)
+class ProgressEvent:
+    index: int
+    path: Path
+    stage: ProgressStage
+    completed: int | None = None
+    total: int | None = None
+    failed: int = 0
+
+
+ProgressCallback = Callable[[ProgressEvent], None]
 
 
 @dataclass
@@ -117,6 +137,8 @@ class ExecutionRecord:
     embedding_usage: EmbeddingUsage | None = None
     error: RunError | None = None
     failed_stage: str | None = None
+    path: Path | None = field(default=None, kw_only=True)
+    on_progress: ProgressCallback | None = field(default=None, kw_only=True, repr=False)
     _timing: dict = field(init=False, repr=False, compare=False)
 
     @property
@@ -126,6 +148,11 @@ class ExecutionRecord:
         if self.parse_status == "partial" or self.embedding_error_count:
             return "partial"
         return "complete"
+
+    def progress(self, stage: ProgressStage, completed: int | None = None,
+                 total: int | None = None, failed: int = 0) -> None:
+        if self.on_progress is not None and self.path is not None:
+            self.on_progress(ProgressEvent(self.index, self.path, stage, completed, total, failed))
 
     @contextmanager
     def measure(self, stage: str):

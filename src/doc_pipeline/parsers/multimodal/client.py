@@ -11,7 +11,13 @@ import httpx
 
 from doc_pipeline.contracts.config import Config, Limits, api_key
 from doc_pipeline.contracts.core import InputFile, PipelineError
-from doc_pipeline.contracts.run import MinerUObservation, RunInstant
+from doc_pipeline.contracts.run import (
+    MinerUObservation,
+    ProgressCallback,
+    ProgressEvent,
+    ProgressStage,
+    RunInstant,
+)
 from doc_pipeline.services.io import (
     RETRY_ATTEMPTS,
     RETRY_DELAY_SECONDS,
@@ -188,7 +194,7 @@ def _poll_rows(data: dict, submitted: dict[str, _Submission]) -> dict[str, dict]
 
 
 def obtain_archives(sources: list[tuple[int, InputFile]], config: Config, client: httpx.Client,
-                    work: Path) -> list[ArchiveSuccess | ArchiveFailure]:
+                    work: Path, *, on_progress: ProgressCallback | None = None) -> list[ArchiveSuccess | ArchiveFailure]:
     start = time.monotonic()
     deadline = start + config.mineru.timeout_seconds
     submitted = {item.observation.data_id: item for item in (_Submission(*source) for source in sources)}
@@ -203,6 +209,13 @@ def obtain_archives(sources: list[tuple[int, InputFile]], config: Config, client
     def fail(item: _Submission, error: PipelineError, elapsed: float) -> None:
         results[item.index] = ArchiveFailure(item.index, item.observation, elapsed, error, RunInstant.now())
 
+    def progress(item: _Submission, stage: ProgressStage, completed: int | None = None,
+                 total: int | None = None) -> None:
+        if on_progress is not None:
+            on_progress(ProgressEvent(item.index, item.source.path, stage, completed, total))
+
+    for item in submitted.values():
+        progress(item, "upload")
     try:
         data = _api(client, config, deadline, "POST", "/api/v4/file-urls/batch",
                     json={**options, "files": files})
@@ -218,6 +231,7 @@ def obtain_archives(sources: list[tuple[int, InputFile]], config: Config, client
                 if not isinstance(url, str):
                     raise PipelineError("parse", "invalid_provider_response")
                 _upload(client, url, item.source.path, timeout)
+                progress(item, "remote_parse")
             except PipelineError as error:
                 fail(pending.pop(data_id), error, time.monotonic() - start)
             except httpx.InvalidURL:
@@ -232,9 +246,14 @@ def obtain_archives(sources: list[tuple[int, InputFile]], config: Config, client
                 if data_id not in pending:
                     continue
                 item = pending[data_id]
-                item.observation.observe_progress(row.get("extract_progress"))
+                observation = item.observation
+                previous = (observation.extracted_pages, observation.total_pages)
+                observation.observe_progress(row.get("extract_progress"))
                 state = row["state"]
                 if state in _PENDING_STATES:
+                    pages = (observation.extracted_pages, observation.total_pages)
+                    if pages != previous:
+                        progress(item, "remote_parse", *pages)
                     continue
                 pending.pop(data_id)
                 elapsed = time.monotonic() - start
@@ -252,6 +271,7 @@ def obtain_archives(sources: list[tuple[int, InputFile]], config: Config, client
             fail(item, error, elapsed)
 
     for item, url, elapsed in downloads:
+        progress(item, "download")
         archive = work / f"{item.index}.zip"
         started = time.monotonic()
         try:

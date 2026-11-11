@@ -108,8 +108,14 @@ def test_bad_batch_preserves_successful_vectors_and_failure_reasons(tmp_path, co
             return httpx.Response(200, json={"model": body["model"], "data": [row(0, [1, 2])]})
         return httpx.Response({"Retry": 503, "Rejected": 413}[name])
 
+    progress = []
     with httpx.Client(transport=httpx.MockTransport(handle)) as client:
-        process_file(source, output, config, client=client)
+        process_file(source, output, config, client=client, on_progress=progress.append)
+
+    counts = [(event.completed, event.total, event.failed)
+              for event in progress if event.stage == "embedding"]
+    assert counts == [(0, 3, 0), (3, 3, 2)]
+    assert progress[-1].stage == "partial"
 
     report, chunks, vectors = read_output(output)
     assert [chunk["body"] for chunk in chunks] == [

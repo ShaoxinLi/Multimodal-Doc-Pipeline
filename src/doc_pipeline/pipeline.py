@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from zipfile import BadZipFile, ZipFile
 
@@ -16,7 +17,7 @@ from doc_pipeline.chunking.builder import make_chunks
 from doc_pipeline.chunking.citations import chunk_records
 from doc_pipeline.contracts.config import Config, Limits
 from doc_pipeline.contracts.core import FileRef, InputFile, PipelineError
-from doc_pipeline.contracts.run import EmbeddingUsage, ExecutionRecord, RunClock
+from doc_pipeline.contracts.run import EmbeddingUsage, ExecutionRecord, ProgressCallback, RunClock
 from doc_pipeline.parsed_content.md_renderer import render_markdown
 from doc_pipeline.parsers.multimodal.client import ArchiveFailure, ArchiveSuccess, obtain_archives
 from doc_pipeline.services.embeddings import embed_chunks
@@ -97,6 +98,7 @@ def _empty_directory(directory: Path) -> Path:
 
 def _intake(source: InputFile, output_dir: Path, limits: Limits, record: ExecutionRecord,
             *, output_root: Path | None = None) -> _Document:
+    record.progress("intake")
     with record.measure("intake"):
         path = source.path
         kind = validate_source(path, path.name, limits)
@@ -111,6 +113,7 @@ def _intake(source: InputFile, output_dir: Path, limits: Limits, record: Executi
 def _finalize(document: _Document, config: Config, client: httpx.Client,
               limits: Limits, archive: Path | None = None) -> dict:
     output_dir, record = document.output_dir, document.record
+    record.progress("parse")
     with record.measure("parse"):
         if archive is None:
             from doc_pipeline.parsers.text.parser import parse_text_document
@@ -135,7 +138,9 @@ def _finalize(document: _Document, config: Config, client: httpx.Client,
     vectors, errors = [], []
     if config.embedding is not None:
         with record.measure("embedding"):
-            vectors, errors, record.embedding_usage = embed_chunks(chunks, config, client)
+            vectors, errors, record.embedding_usage = embed_chunks(
+                chunks, config, client, on_progress=partial(record.progress, "embedding"),
+            )
             record.embedding_count = len(vectors)
             record.embedding_error_count = len(errors)
     with record.measure("write"):
@@ -186,10 +191,11 @@ def _finish_remote(document: _Document, outcome: ArchiveSuccess | ArchiveFailure
 
 def process_file(path: Path, output_dir: Path, config: Config | None = None, *,
                  assets: dict[str, Path] | None = None, encoding: str = "utf-8",
-                 client: httpx.Client | None = None) -> dict:
+                 client: httpx.Client | None = None,
+                 on_progress: ProgressCallback | None = None) -> dict:
     config = config or Config()
     limits = Limits()
-    record = ExecutionRecord(RunClock(), 0)
+    record = ExecutionRecord(RunClock(), 0, path=path, on_progress=on_progress)
     try:
         source = InputFile(path=path, assets=assets or {}, encoding=encoding)
         document = _intake(source, output_dir, limits, record)
@@ -198,13 +204,17 @@ def process_file(path: Path, output_dir: Path, config: Config | None = None, *,
                 report = _finalize(document, config, http, limits)
             else:
                 with tempfile.TemporaryDirectory(prefix="doc-pipeline-") as temporary:
-                    [outcome] = obtain_archives([(0, source)], config, http, Path(temporary))
+                    [outcome] = obtain_archives(
+                        [(0, source)], config, http, Path(temporary), on_progress=on_progress,
+                    )
                     report = _finish_remote(document, outcome, config, http, limits)
     except (PipelineError, OSError, ValueError) as error:
         record.fail(error)
         record.log()
+        record.progress(record.status)
         raise
     record.log()
+    record.progress(record.status)
     return report
 
 
@@ -212,15 +222,19 @@ def _process_document(document: _Document, config: Config, client: httpx.Client,
                       outcome: ArchiveSuccess | ArchiveFailure | None = None) -> dict | None:
     try:
         if outcome is None:
-            return _finalize(document, config, client, limits)
-        return _finish_remote(document, outcome, config, client, limits)
+            report = _finalize(document, config, client, limits)
+        else:
+            report = _finish_remote(document, outcome, config, client, limits)
     except (PipelineError, OSError, ValueError) as error:
         document.record.fail(error)
-        return None
+        report = None
+    document.record.progress(document.record.status)
+    return report
 
 
 def process_files(paths: Iterable[Path | InputFile], output_dir: Path, config: Config | None = None, *,
-                  client: httpx.Client | None = None) -> dict:
+                  client: httpx.Client | None = None,
+                  on_progress: ProgressCallback | None = None) -> dict:
     config = config or Config()
     inputs = list(paths)
     if not inputs:
@@ -245,14 +259,15 @@ def process_files(paths: Iterable[Path | InputFile], output_dir: Path, config: C
             aggregate_usage.add(record.embedding_usage)
 
     for index, item in enumerate(inputs):
-        record = ExecutionRecord(RunClock(run_id=clock.run_id), index)
         path = item.path if isinstance(item, InputFile) else item
+        record = ExecutionRecord(RunClock(run_id=clock.run_id), index, path=path, on_progress=on_progress)
         try:
             source = item if isinstance(item, InputFile) else InputFile(path=item)
             document = _intake(source, output_dir / f"{index + 1:04d}", limits, record,
                                output_root=output_dir)
         except (PipelineError, OSError, ValueError) as error:
             record.fail(error)
+            record.progress(record.status)
             collect(record, path)
             continue
         documents = local if document.kind in TEXT_FORMATS else remote
@@ -267,7 +282,7 @@ def process_files(paths: Iterable[Path | InputFile], output_dir: Path, config: C
                 group = remote[start:start + size]
                 with tempfile.TemporaryDirectory(prefix="doc-pipeline-") as temporary:
                     outcomes = obtain_archives([(item.record.index, item.source) for item in group],
-                                               config, http, Path(temporary))
+                                               config, http, Path(temporary), on_progress=on_progress)
                     for document, outcome in zip(group, outcomes, strict=True):
                         report = _process_document(document, config, http, limits, outcome)
                         collect(document.record, document.source.path, report)
