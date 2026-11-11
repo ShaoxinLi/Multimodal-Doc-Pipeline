@@ -5,8 +5,11 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 from PIL import Image as PillowImage
 
-from doc_pipeline.contracts.config import Limits
-from doc_pipeline.contracts.core import FileRef
+from doc_pipeline.chunking.builder import make_chunks
+from doc_pipeline.chunking.citations import export_chunks
+from doc_pipeline.contracts.config import Config, Limits
+from doc_pipeline.contracts.core import FileRef, SourceIdentity
+from doc_pipeline.parsed_content.md_renderer import render_markdown
 from doc_pipeline.parsers.multimodal.parser import decode_archive
 from tests.support import pdf_bytes
 
@@ -43,3 +46,10 @@ def _png():
     stream = BytesIO()
     PillowImage.new("RGB", (2, 2), "red").save(stream, format="PNG")
     return stream.getvalue()
+
+
+def exported_rows(parsed, source, source_type):
+    _, mappings = render_markdown(parsed)
+    chunks = make_chunks(parsed, mappings, Config())
+    identity = SourceIdentity(document_id="test", name="document", uri=source.path)
+    return list(export_chunks(chunks, parsed, source=source, source_type=source_type, identity=identity, resources={}))

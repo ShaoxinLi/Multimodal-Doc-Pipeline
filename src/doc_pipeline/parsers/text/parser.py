@@ -68,7 +68,7 @@ def _parse_text(source: TextSource) -> list[TextBlock]:
 
 def parse_text_document(source: InputFile, source_ref: FileRef, output_dir: Path, *,
                         max_asset_bytes: int = Limits().max_source_bytes,
-                        output_root: Path | None = None) -> ParsedContent:
+                        output_root: Path | None = None, source_dir: Path | None = None) -> ParsedContent:
 
     suffix = source.path.suffix.lower().removeprefix(".")
     format_ = _SUFFIXES.get(suffix, suffix)
@@ -80,7 +80,7 @@ def parse_text_document(source: InputFile, source_ref: FileRef, output_dir: Path
         parsed_source = TextSource(raw.decode(source.encoding), source_ref)
     except (LookupError, UnicodeDecodeError) as exc:
         raise PipelineError("parse", "native_decode_error") from exc
-    resolve = AssetResolver(source.assets, output_dir, source_dir=source.path.resolve().parent,
+    resolve = AssetResolver(source.assets, output_dir, source_dir=source_dir or source.path.resolve().parent,
                             max_asset_bytes=max_asset_bytes, output_root=output_root)
     if parser is None:
         records, diagnostics = _parse_text(parsed_source), []
@@ -103,7 +103,7 @@ def parse_text_document(source: InputFile, source_ref: FileRef, output_dir: Path
             *record.related_ranges,
             *(asset.definition for asset in record.images if asset.definition is not None),
         ])
-        block = Block(id=block_id, payload=payload)
+        block = Block(id=block_id, payload=payload, anchors=record.anchors)
         locations = [span, *(parsed_source.span(*bounds) for bounds in related)]
         precision = "exact" if not related and canonical_text(block) == original else "enclosing"
         blocks.append(block.model_copy(update={"locations": locations, "location_precision": precision}))
@@ -111,6 +111,7 @@ def parse_text_document(source: InputFile, source_ref: FileRef, output_dir: Path
             InlineAssetUse(
                 owner_block_id=block_id,
                 table_cell=asset.table_cell,
+                codepoints=asset.codepoints,
                 original_reference=asset.reference,
                 alt=asset.alt,
                 asset=asset.file,

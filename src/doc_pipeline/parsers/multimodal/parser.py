@@ -1,18 +1,29 @@
 import hashlib
 import json
+import posixpath
 import re
 from pathlib import Path, PurePosixPath
 from typing import Any
+from xml.etree import ElementTree
+from zipfile import BadZipFile, ZipFile
 
 from doc_pipeline.contracts.config import Limits
-from doc_pipeline.contracts.core import FileRef, PipelineError
+from doc_pipeline.contracts.core import FileRef, PagePosition, PipelineError, SheetPosition, SlidePosition
 from doc_pipeline.contracts.document import Block, Heading, Opaque, ParsedContent
 from doc_pipeline.parsers.multimodal.archive import open_validated_archive
 from doc_pipeline.parsers.multimodal.block_decoder import BlockDecoder
 from doc_pipeline.parsers.multimodal.markup_converter import string_value
-from doc_pipeline.parsers.multimodal.pdf_evidence import PdfEvidenceMatcher, pdf_page_frames
+from doc_pipeline.parsers.multimodal.pdf_evidence import (
+    PdfEvidenceMatcher,
+    page_correspondence,
+    pdf_page_frames,
+)
+from doc_pipeline.services.io import write_bytes
 
 _CONTENT_LIST_NAME = "content_list_v2.json"
+_XML_LIMIT = 20_000_000
+_REL_ID = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+_STRICT_REL_ID = "{http://purl.oclc.org/ooxml/officeDocument/relationships}id"
 
 
 def _reject_constant(value: str) -> None:
@@ -64,7 +75,7 @@ def decode_archive(
     archive_path: Path,
     output_dir: Path,
     limits: Limits,
-    *, source_type: str | None = None,
+    *, source_type: str | None = None, original_path: Path | None = None,
 ) -> ParsedContent:
     with open_validated_archive(archive_path, limits) as archive:
         names = [member.filename for member in archive.infolist() if not member.is_dir()]
@@ -79,18 +90,37 @@ def decode_archive(
         groups = _page_groups(archive.read(member))
 
         diagnostics = []
+        source_type = source_type or Path(source_ref.path).suffix.lower().lstrip(".")
+        native_members = {"content_list": member}
+        native_profile = {}
+        pdf_pages, office = [], {}
+        if original_path is not None and source_type in {"pptx", "xlsx"}:
+            origins = [name for name in names if PurePosixPath(name).name.endswith(f"_origin.{source_type}")]
+            if len(origins) == 1:
+                native_members["origin"] = origins[0]
+                if hashlib.sha256(archive.read(origins[0])).hexdigest() == source_ref.sha256:
+                    office = office_locations(original_path, source_type, groups, source_ref)
+                else:
+                    diagnostics.append("mineru_office_origin_mismatch")
+            else:
+                diagnostics.append("mineru_office_origin_missing_or_ambiguous")
         pdf_ref = None
         frames = []
         candidates = [name for name in names if PurePosixPath(name).name.endswith("_origin.pdf")]
         if len(candidates) == 1:
+            native_members["provider_pdf"] = candidates[0]
             pdf = archive.read(candidates[0])
+            digest = hashlib.sha256(pdf).hexdigest()
+            if original_path is not None and source_type == "pdf":
+                pdf_pages, native_profile = page_correspondence(original_path, pdf, identical=digest == source_ref.sha256)
             frames = pdf_page_frames(pdf)
             if frames:
-                digest = hashlib.sha256(pdf).hexdigest()
-                if digest == source_ref.sha256:
+                if source_type == "pdf" and digest == source_ref.sha256:
                     pdf_ref = source_ref
                 else:
-                    pdf_ref = FileRef(path="provider.pdf", sha256=digest)
+                    pdf_ref = FileRef(path="native/provider.pdf", sha256=digest)
+                    if original_path is not None:
+                        write_bytes(output_dir / pdf_ref.path, pdf)
             else:
                 diagnostics.append("mineru_invalid_provider_pdf")
         elif len(candidates) > 1:
@@ -99,10 +129,15 @@ def decode_archive(
         layout = None
         optional = _optional_member(names, PurePosixPath(member).parent, "layout.json", diagnostics)
         if optional is not None:
+            native_members["layout"] = optional
             try:
                 layout = _load_json(archive.read(optional))
                 if not isinstance(layout, dict) or not isinstance(layout.get("pdf_info"), list):
                     raise ValueError("expected layout object with page list")
+                for key in ("_version_name", "_backend"):
+                    value = layout.get(key)
+                    if isinstance(value, str):
+                        native_profile[key.removeprefix("_")] = value
             except (ValueError, RecursionError):
                 diagnostics.append("mineru_invalid_layout")
         else:
@@ -110,13 +145,30 @@ def decode_archive(
 
         locations = PdfEvidenceMatcher(layout, pdf_ref, frames)
         decoder = BlockDecoder(archive, output_dir, member, locations)
-        slides = (source_type or Path(source_ref.path).suffix.lower().lstrip(".")) in {"ppt", "pptx"}
+        slides = source_type in {"ppt", "pptx"}
+        mapped_pages = {page.number: page for page in pdf_pages if page.basis == "equivalent_page"}
         blocks = []
         for group_index, group in enumerate(groups):
             for block_index, node in enumerate(group):
                 block = decoder.decode(group_index, block_index, node)
                 if slides:
                     block = block.model_copy(update={"semantic_scope": group_index})
+                if group_index in office:
+                    block = block.model_copy(update={
+                        "locations": [*block.locations, office[group_index]],
+                        "location_precision": "enclosing",
+                        "location_error": None,
+                    })
+                elif source_type == "pdf" and pdf_ref != source_ref and block.locations:
+                    original_pages = [
+                        PagePosition(source=source_ref, number=loc.page_index + 1) for loc in block.locations
+                        if loc.page_index + 1 in mapped_pages
+                    ]
+                    block = block.model_copy(update={
+                        "locations": [*block.locations, *original_pages],
+                        "location_error": None if len(original_pages) == len(block.locations)
+                        else "original_pdf_page_unverified",
+                    })
                 blocks.append(block)
 
     if any(block.location_precision == "unresolved" for block in blocks):
@@ -131,6 +183,9 @@ def decode_archive(
         inline_assets=decoder.inline_assets,
         parse_status="partial" if any(isinstance(block.payload, Opaque) for block in blocks) else "complete",
         diagnostics=[*diagnostics, *decoder.diagnostics],
+        pdf_pages=pdf_pages,
+        native_members=native_members,
+        native_profile=native_profile,
     )
 
 
@@ -216,3 +271,89 @@ def _restore_roman_subsections(blocks: list[Block]) -> tuple[list[Block], bool]:
                 result[index] = blocks[index].model_copy(update={"payload": payload})
                 changed = True
     return result, changed
+
+
+def _xml(archive, name: str):
+    if archive.getinfo(name).file_size > _XML_LIMIT:
+        raise ValueError("oversize OOXML XML")
+    return ElementTree.fromstring(archive.read(name))
+
+
+def _compact(text: str) -> str:
+    return re.sub(r"\s", "", text)
+
+
+def _spans(value):
+    if isinstance(value, dict):
+        content = value.get("content")
+        if value.get("type") in {"text", "hyperlink", "equation_inline"} and isinstance(content, str):
+            span = _compact(content)
+            if span:
+                yield span
+        for child in value.values():
+            if isinstance(child, (dict, list)):
+                yield from _spans(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _spans(child)
+
+
+def _slides(archive, groups, ref):
+    deck = _xml(archive, "ppt/presentation.xml")
+    slides = deck.findall("{*}sldIdLst/{*}sldId")
+    if len(slides) != len(groups):
+        return {}
+    relations = _xml(archive, "ppt/_rels/presentation.xml.rels")
+    slide_relations = [rel for rel in relations
+                       if rel.get("TargetMode") != "External" and rel.get("Type", "").endswith("/slide")]
+    targets = {rel.attrib["Id"]: rel.attrib["Target"] for rel in slide_relations}
+    if len(targets) != len(slide_relations):
+        return {}
+    originals = []
+    for slide in slides:
+        key = slide.get(_REL_ID) or slide.get(_STRICT_REL_ID)
+        target = targets[key]
+        path = posixpath.normpath(target.lstrip("/") if target.startswith("/") else "ppt/" + target)
+        if not path.startswith("ppt/"):
+            return {}
+        xml = _xml(archive, path)
+        originals.append(_compact("".join(node.text or "" for node in xml.findall(".//{*}t"))))
+    positions = {}
+    for i, group in enumerate(groups):
+        extracted = set(_spans(group))
+        matches = [j for j, original in enumerate(originals) if extracted and all(s in original for s in extracted)]
+        if matches == [i]:
+            positions[i] = SlidePosition(source=ref, number=i + 1)
+    return positions
+
+
+def _sheets(archive, groups, ref):
+    book = _xml(archive, "xl/workbook.xml")
+    sheets = book.findall("{*}sheets/{*}sheet")
+    if len(sheets) != len(groups):
+        return {}
+    positions = {}
+    known_names = {sheet.attrib["name"] for sheet in sheets}
+    for i, (sheet, group) in enumerate(zip(sheets, groups, strict=True)):
+        name = sheet.attrib["name"]
+        titles = []
+        for node in group:
+            if node["type"] == "title" and isinstance(node.get("content"), dict):
+                spans = node["content"].get("title_content", [])
+                if isinstance(spans, list):
+                    titles.append("".join(s["content"] for s in spans if isinstance(s, dict)
+                                          and isinstance(s.get("content"), str)))
+        if len(sheets) == 1 or known_names.intersection(titles) == {name}:
+            positions[i] = SheetPosition(source=ref, name=name)
+    return positions
+
+
+def office_locations(path: Path, source_type: str, groups, ref: FileRef):
+    try:
+        with ZipFile(path) as archive:
+            names = archive.namelist()
+            if len(names) != len(set(names)):
+                return {}
+            return (_slides if source_type == "pptx" else _sheets)(archive, groups, ref)
+    except (BadZipFile, ElementTree.ParseError, OSError, KeyError, TypeError, ValueError, RecursionError):
+        return {}

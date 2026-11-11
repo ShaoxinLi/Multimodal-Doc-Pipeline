@@ -2,7 +2,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from doc_pipeline.contracts.core import FileRef, Model, Range
+from doc_pipeline.contracts.core import Model, PagePosition, Range, SheetPosition, SlidePosition
 
 
 class Whole(Model):
@@ -64,11 +64,12 @@ class Citation(Model):
     input_range: Range | None = None
     heading_index: int | None = None
     markdown: MarkdownLocation
-    locations: list[Annotated[TextLocation | PdfLocation, Field(discriminator="kind")]]
+    locations: list[Annotated[TextLocation | PdfLocation | PagePosition | SlidePosition | SheetPosition, Field(discriminator="kind")]]
     precision: Literal["exact", "enclosing", "unresolved"]
     reason: str | None = None
     table_rows: Range | None = None
     labels: list[str] = Field(default_factory=list)
+    anchors: list[str] = Field(default_factory=list)
     assets: list[str] = Field(default_factory=list)
 
 
@@ -78,33 +79,3 @@ class Chunk(Model):
     heading_path: list[str]
     embedding_input: str | None
     citations: list[Citation]
-
-
-class ObjectLabels(Model):
-    tables: list[str] = Field(default_factory=list)
-    algorithms: list[str] = Field(default_factory=list)
-    equations: list[str] = Field(default_factory=list)
-    figures: list[str] = Field(default_factory=list)
-    code: list[str] = Field(default_factory=list)
-
-
-class SourceLocationRef(Model):
-    citation_index: int
-    location_index: int
-    coordinate_space: Literal["original", "converted"]
-    source: FileRef
-
-
-class ChunkMetadata(Model):
-    document_id: str
-    document_version: str | None = None
-    source: FileRef
-    source_type: str
-    page_indices: list[int] | None
-    page_coordinate_space: Literal["original", "converted"] | None
-    page_status: Literal["known", "partial", "unavailable", "nonpaged", "mixed"]
-    slide_indices: list[int] | None
-    section_path: list[str]
-    block_ids: list[str]
-    labels: ObjectLabels
-    source_locations: list[SourceLocationRef]

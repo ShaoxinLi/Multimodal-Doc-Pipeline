@@ -101,6 +101,7 @@ Payload = Annotated[Heading | Text | Table | Code | Algorithm | Equation | Image
 class Block(Model):
     id: str
     payload: Payload
+    anchors: list[str] = Field(default_factory=list)
     semantic_scope: int | None = Field(default=None, ge=0)
     locations: list[Location] = Field(default_factory=list)
     location_precision: Literal["exact", "enclosing", "unresolved"] = "unresolved"
@@ -117,6 +118,7 @@ class MarkdownMapping(Model):
 
 class InlineAssetUse(Model):
     owner_block_id: str
+    codepoints: Range | None = None
     table_cell: tuple[int, int] | None = None
     original_reference: str
     alt: str = ""
@@ -124,11 +126,21 @@ class InlineAssetUse(Model):
     resolution: AssetResolution
 
 
+class PdfPageMapping(Model):
+    number: int = Field(ge=1)
+    label: str | None
+    basis: Literal["identical_bytes", "equivalent_page", "unmapped"]
+    reason: str | None
+
+
 class ParsedContent(Model):
     blocks: list[Block]
     inline_assets: list[InlineAssetUse] = Field(default_factory=list)
     parse_status: Literal["complete", "partial"] = "complete"
     diagnostics: list[str] = Field(default_factory=list)
+    pdf_pages: list[PdfPageMapping] = Field(default_factory=list)
+    native_members: dict[str, str] = Field(default_factory=dict)
+    native_profile: dict[str, str] = Field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -139,6 +151,7 @@ class TextAsset:
     file: FileRef | None = None
     table_cell: tuple[int, int] | None = None
     definition: tuple[int, int] | None = None
+    codepoints: Range | None = None
 
 
 @dataclass
@@ -148,3 +161,4 @@ class TextBlock:
     payload: Payload
     images: list[TextAsset] = field(default_factory=list)
     related_ranges: list[tuple[int, int]] = field(default_factory=list)
+    anchors: list[str] = field(default_factory=list)

@@ -8,7 +8,7 @@ from threading import Event, Thread
 import pytest
 from PIL import Image
 
-from doc_pipeline import process_file
+from doc_pipeline import Artifact, process_file
 from tests.support import PROJECT_ROOT, document_archive, pdf_bytes, read_output, write_source_pdf
 
 
@@ -53,26 +53,30 @@ def test_cli_accepts_file_and_existing_empty_mount_directory(tmp_path):
         "embeddings.jsonl",
         "report.json",
         "assets",
+        "source",
+        "blocks.jsonl",
+        "provenance.jsonl",
+        "document.json",
     }
     assert source.read_text(encoding="utf-8") == original
 
 
-def test_failed_publication_clears_existing_output_directory(tmp_path, monkeypatch):
+def test_failed_artifact_publication_clears_existing_output_directory(tmp_path, monkeypatch):
     source = tmp_path / "input.txt"
     source.write_text("Body.")
     output = tmp_path / "out"
     output.mkdir()
     rename = Path.rename
 
-    def fail_report(path, target):
-        if target == output / "report.json":
+    def fail_manifest(path, target):
+        if target == output / "document.json":
             assert (output / "content.md").is_file()
             assert (output / "chunks.jsonl").is_file()
-            raise OSError("report publication failed")
+            raise OSError("manifest publication failed")
         return rename(path, target)
 
-    monkeypatch.setattr(Path, "rename", fail_report)
-    with pytest.raises(OSError, match="report publication failed"):
+    monkeypatch.setattr(Path, "rename", fail_manifest)
+    with pytest.raises(OSError, match="manifest publication failed"):
         process_file(source, output)
 
     assert list(output.iterdir()) == []
@@ -197,10 +201,13 @@ def test_image_only_input_retains_asset_and_text_citation(tmp_path):
     _, [chunk], vectors = read_output(output)
     assert chunk["embedding_input"] is None
     assert vectors == []
-    [citation] = chunk["citations"]
-    assert citation["locations"][0]["path"] == str(source.resolve())
-    [relative] = citation["assets"]
-    assert (output / relative).read_bytes() == asset.read_bytes()
+    artifact = Artifact.open(output, expected_id=chunk["artifact_id"])
+    evidence, _ = artifact.evidence(chunk["id"])
+    [selection] = evidence.selections
+    assert selection.locations[0].path == "source/original.md"
+    [relative] = chunk["assets"]
+    assert selection.assets == [relative, relative]
+    assert artifact.asset(relative) == asset.read_bytes()
     assert relative in (output / "content.md").read_text()
 
 

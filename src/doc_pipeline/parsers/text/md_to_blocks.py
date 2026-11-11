@@ -13,6 +13,7 @@ from mdit_py_plugins.dollarmath import dollarmath_plugin
 from mdit_py_plugins.footnote import footnote_plugin
 from mdit_py_plugins.front_matter import front_matter_plugin
 
+from doc_pipeline.contracts.core import Range
 from doc_pipeline.contracts.document import (
     Cell,
     Code,
@@ -30,22 +31,44 @@ from doc_pipeline.parsers.text.assets import AssetResolver, asset_html, image_pa
 from doc_pipeline.parsers.text.source import TextSource
 
 
-def _plain(tokens: list[Token]) -> str:
-    out = []
+def _plain_segments(tokens: list[Token]):
     for token in tokens:
         if token.type == "math_inline":
-            out.append(f"${token.content}$")
+            yield f"${token.content}$", None
         elif token.type in {"text", "code_inline"}:
-            out.append(token.content)
+            yield token.content, None
         elif token.type in {"softbreak", "hardbreak"}:
-            out.append("\n")
+            yield "\n", None
         elif token.type == "footnote_ref":
-            out.append(f"[^{token.meta.get('label', token.meta['id'])}]")
-        elif token.children:
-            out.append(_plain(token.children))
+            yield f"[^{token.meta.get('label', token.meta['id'])}]", None
         elif token.type == "image":
-            out.append(token.content)
-    return "".join(out)
+            yield _plain(token.children) if token.children else token.content, token
+        elif token.children:
+            yield from _plain_segments(token.children)
+
+
+def _plain(tokens: list[Token]) -> str:
+    return "".join(text for text, _ in _plain_segments(tokens))
+
+
+def _body_text(group: list[Token]) -> tuple[str, list[TextAsset]]:
+    offset = 0
+    pieces, assets = [], []
+    for token in group:
+        if token.type not in {"inline", "code_block", "fence", "math_block"}:
+            continue
+        if pieces:
+            offset += 1
+        parts = []
+        segments = _plain_segments(token.children or []) if token.type == "inline" else [(token.content, None)]
+        for text, image in segments:
+            end = offset + len(text)
+            if image is not None and "text_asset" in image.meta:
+                assets.append(replace(image.meta["text_asset"], codepoints=Range(start=offset, end=end)))
+            parts.append(text)
+            offset = end
+        pieces.append("".join(parts))
+    return "\n".join(pieces), assets
 
 
 # Browsers end comments at "-->" or "--!>" and treat "<!-->" and "<!--->" as empty comments.
@@ -280,11 +303,7 @@ def parse_markdown(source: TextSource, resolve: AssetResolver) -> tuple[list[Tex
         if table is not None:
             records.append(TextBlock(start, end, table.model_copy(update={"html": rendered}), images=assets))
             continue
-        value = "\n".join(
-            _plain(token.children or []) if token.type == "inline" else token.content
-            for token in group
-            if token.type in {"inline", "code_block", "fence", "math_block"}
-        )
+        value, assets = _body_text(group)
         if top.type == "heading_open":
             payload = Heading(text=value, level=int(top.tag[1:]), markdown=rendered)
         else:

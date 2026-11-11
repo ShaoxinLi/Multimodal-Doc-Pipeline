@@ -5,7 +5,7 @@ from zipfile import ZipFile
 import httpx
 import pytest
 
-from doc_pipeline import Config, PipelineError, process_file
+from doc_pipeline import Artifact, ArtifactError, Config, PipelineError, process_file
 from tests.support import document_archive, pdf_bytes, read_output, write_source_pdf
 
 
@@ -110,33 +110,26 @@ def test_multimodal_citations_target_the_original_file_and_transfers_are_credent
     assert report["chunk_count"] == len(chunks) > 0
     assert vectors == []
     assert "Pipeline probe section 1" in (output / "content.md").read_text()
-    citations = [citation for chunk in chunks for citation in chunk["citations"]]
-    locations = [location for citation in citations for location in citation["locations"]]
+    artifact = Artifact.open(output, expected_id=report["artifact_id"])
+    assert artifact.source() == source.read_bytes()
+    assert (output / "native/mineru.zip").read_bytes() == provider.archive
+    selections = [item for chunk in chunks for item in artifact.evidence(chunk["id"])[0].selections]
+    locations = [location for selection in selections for location in selection.locations]
     if converted:
-        assert locations == []
-        assert any(citation.get("reason") == "original_source_location_unverified" for citation in citations)
+        assert {(location.kind, location.path) for location in locations} == {("pdf", "native/provider.pdf")}
+        assert (output / "native/provider.pdf").read_bytes() == pdf
+        assert all(chunk["citations"]["pages"] is None for chunk in chunks)
+        assert all(chunk["citations"]["location_status"] == "unavailable" for chunk in chunks)
     else:
-        assert {(location["kind"], location["path"]) for location in locations} == {("pdf", str(source.resolve()))}
-        assert {location["page_index"] for location in locations} >= {0, 1}
-    for chunk in chunks:
-        metadata = chunk["metadata"]
-        assert metadata["source"] == report["source"]
-        if converted:
-            assert metadata["source_locations"] == []
-            assert metadata["page_indices"] is None
-            assert metadata["page_coordinate_space"] is None
-            assert metadata["page_status"] == "unavailable"
-        else:
-            for ref in metadata["source_locations"]:
-                assert ref["source"] == report["source"]
-                assert ref["coordinate_space"] == "original"
-    assert all("sha256" not in json.dumps(citation) for citation in citations)
+        assert {(location.kind, location.path) for location in locations} == {("pdf", "source/original.pdf")}
+        assert {location.page_index for location in locations} >= {0, 1}
+        assert {page.basis for page in artifact.manifest.pdf_pages} == {"identical_bytes"}
+    assert all(chunk["metadata"]["source_sha256"] == report["source"]["sha256"] for chunk in chunks)
     for location in locations:
-        x1, y1, x2, y2 = location["bbox"]
-        width, height = location["page_size"]
+        x1, y1, x2, y2 = location.bbox
+        width, height = location.page_size
         assert 0 <= x1 < x2 <= width
         assert 0 <= y1 < y2 <= height
-    assert {path.name for path in output.iterdir()} == {"content.md", "chunks.jsonl", "embeddings.jsonl", "report.json"}
 
 
 def test_multimodal_signed_download_rejects_unsafe_redirect(tmp_path, config):
@@ -159,9 +152,9 @@ def test_multimodal_render_failure_leaves_no_converted_pdf(tmp_path, config, mon
     provider = DocumentService(source_pdf, document_archive(pdf_bytes()))
 
     def fail_render(parsed):
-        locations = [location for block in parsed.blocks for location in block.locations]
+        locations = [location for block in parsed.blocks for location in block.locations if location.kind == "pdf_region"]
         assert {location.page_index for location in locations} == {0, 1}
-        assert all(location.source.path == "provider.pdf" for location in locations)
+        assert all(location.source.path == "native/provider.pdf" for location in locations)
         raise PipelineError("render", "test_render_failure")
 
     monkeypatch.setattr(pipeline, "render_markdown", fail_render)
@@ -252,3 +245,41 @@ def test_configured_mineru_deadline_stops_polling(tmp_path, monkeypatch):
                          Config(mineru={"timeout_seconds": 1}), client=client)
     assert caught.value.code == "parse_timeout"
     assert len(polls) == 1 and elapsed[0] == 1
+
+
+@pytest.mark.parametrize("file", ["native/mineru.zip", "native/provider.pdf"])
+def test_native_files_are_verified(tmp_path, config, file):
+    source = write_source_pdf(tmp_path)
+    output = tmp_path / "out"
+    provider = DocumentService(source, document_archive(pdf_bytes()))
+    with httpx.Client(transport=httpx.MockTransport(provider.handle)) as client:
+        process_file(source, output, config, client=client)
+    Artifact.open(output)
+    path = output / file
+    path.write_bytes(path.read_bytes() + b"corruption")
+    with pytest.raises(ArtifactError, match="checksum"):
+        Artifact.open(output)
+
+
+def test_remote_upload_uses_the_capture_even_when_input_changes(tmp_path, config):
+    source = write_source_pdf(tmp_path)
+    original = source.read_bytes()
+    output = tmp_path / "out"
+    provider = DocumentService(source, document_archive(original))
+
+    def handle(request):
+        if request.method == "PUT":
+            assert request.content == original
+            assert source.read_bytes() != original
+            provider.uploaded = True
+            return httpx.Response(200)
+        return provider.handle(request)
+
+    def mutate(event):
+        assert event.path == source
+        if event.stage == "upload":
+            source.write_bytes(pdf_bytes(3))
+
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        process_file(source, output, config, client=client, on_progress=mutate)
+    assert Artifact.open(output).source() == original

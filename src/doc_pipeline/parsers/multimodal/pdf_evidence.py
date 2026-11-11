@@ -1,18 +1,28 @@
 import math
 import re
 from collections import Counter, defaultdict
+from contextlib import ExitStack
 from dataclasses import dataclass
 from io import BytesIO
+from pathlib import Path
+from threading import Lock
 from typing import Any
 
+import pypdfium2 as pdfium
 from bs4 import BeautifulSoup, NavigableString, Tag
 from pypdf import PdfReader
 from pypdf.errors import PyPdfError
+from pypdf.generic import ArrayObject, DictionaryObject, NumberObject, TextStringObject
 
 from doc_pipeline.contracts.core import FileRef, PdfRegion
+from doc_pipeline.contracts.document import PdfPageMapping
 
 _MARGIN_TOLERANCE = 3.0
 _MIN_INDENT = 5.0
+_RENDER_LOCK = Lock()
+_DPI = (72, 144)
+_MAX_RENDER_PIXELS = 16_000_000
+_PDF_ERRORS = (PyPdfError, ValueError, TypeError, KeyError, IndexError, OverflowError, RecursionError, RuntimeError, pdfium.PdfiumError)
 
 
 @dataclass(frozen=True)
@@ -392,3 +402,129 @@ class PdfEvidenceMatcher:
             return BlockEvidence(regions, None, paragraph_start)
         except (KeyError, TypeError, ValueError, IndexError, RecursionError):
             return BlockEvidence([], "provider_block_geometry_or_content_unverified")
+
+
+def _label_starts(tree, count: int, depth: int = 0) -> list[int]:
+    tree = tree.get_object()
+    if depth > 12 or not isinstance(tree, DictionaryObject):
+        raise ValueError("invalid PDF label tree")
+    if "/Kids" in tree and "/Nums" not in tree and isinstance(tree["/Kids"], ArrayObject):
+        starts = []
+        for child in tree["/Kids"]:
+            child = child.get_object()
+            limits = child["/Limits"]
+            indexes = _label_starts(child, count, depth + 1)
+            if limits != [indexes[0], indexes[-1]]:
+                raise ValueError("invalid PDF label limits")
+            starts.extend(indexes)
+        return starts
+    nums = tree.get("/Nums")
+    if nums is None or "/Kids" in tree:
+        raise ValueError("invalid PDF label entries")
+    nums = nums.get_object()
+    if not isinstance(nums, ArrayObject) or not nums or len(nums) % 2 or len(nums) > 2 * count:
+        raise ValueError("invalid PDF label entries")
+    starts = []
+    for index, style in zip(nums[::2], nums[1::2], strict=True):
+        style = style.get_object()
+        if (not isinstance(index, NumberObject) or not 0 <= index < count
+                or not isinstance(style, DictionaryObject)
+                or style.get("/S") not in {None, "/D", "/R", "/r", "/A", "/a"}
+                or ("/P" in style and not isinstance(style["/P"], TextStringObject))
+                or ("/St" in style and (not isinstance(style["/St"], NumberObject) or not 1 <= style["/St"] <= 10_000))):
+            raise ValueError("invalid PDF label entry")
+        starts.append(int(index))
+    return starts
+
+
+def _labels(reader: PdfReader, count: int) -> list[str | None]:
+    try:
+        if "/PageLabels" in reader.root_object:
+            starts = _label_starts(reader.root_object["/PageLabels"], count)
+            if starts and starts[0] == 0 and starts == sorted(set(starts)):
+                labels = reader.page_labels
+                if len(labels) == count and all(isinstance(label, str) for label in labels):
+                    return [label if label and label != str(i) else None for i, label in enumerate(labels, 1)]
+    except _PDF_ERRORS:
+        pass
+    return [None] * count
+
+
+def _contents(page) -> bytes:
+    stream = page.get_contents()
+    return stream.get_data() if stream is not None else b""
+
+
+def _renderable(page) -> bool:
+    width, height = page.get_size()
+    if not all(math.isfinite(value) and value > 0 for value in (width, height)):
+        return False
+    scale = max(_DPI) / 72
+    return math.ceil(width * scale) * math.ceil(height * scale) <= _MAX_RENDER_PIXELS
+
+
+def _render(page, dpi):
+    bitmap = page.render(scale=dpi / 72, draw_annots=True)
+    try:
+        return bitmap.width, bitmap.height, bitmap.stride, bitmap.format, bytes(bitmap.buffer)
+    finally:
+        bitmap.close()
+
+
+def _compare(original, converted, left, right, index: int) -> str | None:
+    if _contents(original) != _contents(converted):
+        return "decoded_content_mismatch"
+    with ExitStack() as pages:
+        a = left[index]
+        pages.callback(a.close)
+        b = right[index]
+        pages.callback(b.close)
+        if not _renderable(a) or not _renderable(b):
+            return "render_size_limit"
+        for dpi in _DPI:
+            if _render(a, dpi) != _render(b, dpi):
+                return "page_render_mismatch"
+    return None
+
+
+def page_correspondence(source: Path, provider: bytes, *, identical: bool,
+                        ) -> tuple[list[PdfPageMapping], dict[str, str]]:
+    try:
+        original = PdfReader(source, strict=True)
+        count = len(original.pages)
+    except _PDF_ERRORS:
+        return [], {}
+    labels = _labels(original, count)
+    if identical:
+        return [PdfPageMapping(number=i, label=label, basis="identical_bytes", reason=None)
+                for i, label in enumerate(labels, 1)], {}
+
+    profile = {"page_comparison": "decoded_streams_and_rgb_pixels_72_144_dpi",
+               "renderer": f"pypdfium2/{pdfium.PYPDFIUM_INFO}",
+               "pdfium": str(pdfium.PDFIUM_INFO)}
+    try:
+        converted = PdfReader(BytesIO(provider), strict=True)
+        if len(converted.pages) != count:
+            reasons = ["page_count_mismatch"] * count
+        elif "/OCProperties" in original.root_object or "/OCProperties" in converted.root_object:
+            reasons = ["optional_content_unverified"] * count
+        else:
+            # PDFium requires serialized access to its native runtime.
+            with _RENDER_LOCK, pdfium.PdfDocument(source) as left, pdfium.PdfDocument(provider) as right:
+                left.init_forms()
+                right.init_forms()
+                if len(left) != count or len(right) != count:
+                    reasons = ["render_page_count_mismatch"] * count
+                else:
+                    reasons = []
+                    for i in range(count):
+                        try:
+                            reason = _compare(original.pages[i], converted.pages[i], left, right, i)
+                        except _PDF_ERRORS:
+                            reason = "page_comparison_failed"
+                        reasons.append(reason)
+    except _PDF_ERRORS:
+        reasons = ["pdf_comparison_failed"] * count
+    return [PdfPageMapping(number=i, label=label if reason is None else None,
+                           basis="equivalent_page" if reason is None else "unmapped", reason=reason)
+            for i, (label, reason) in enumerate(zip(labels, reasons, strict=True), 1)], profile

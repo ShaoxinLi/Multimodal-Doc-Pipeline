@@ -1,7 +1,7 @@
 import pytest
 from markdown_it import MarkdownIt
 
-from doc_pipeline import process_file
+from doc_pipeline import Artifact, process_file
 from tests.support import read_output
 
 
@@ -21,5 +21,6 @@ def test_exported_markdown_citations_cover_their_blocks_across_newline_styles(tm
         if token.type in {"heading_open", "fence", "paragraph_open"}
     ]
     expected = {(token.map[0] + 1, token.map[1]) for token in tokens}
-    citations = [citation["markdown"] for chunk in chunks for citation in chunk["citations"]]
-    assert {(citation["first_line"], citation["last_line"]) for citation in citations} == expected
+    artifact = Artifact.open(output)
+    citations = [item.markdown for chunk in chunks for item in artifact.evidence(chunk["id"])[0].selections]
+    assert {(citation.first_line, citation.last_line) for citation in citations} == expected

@@ -1,7 +1,11 @@
+import re
+from bisect import bisect_right
 from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+NEWLINE = re.compile(r"\r\n|\r|\n")
 
 
 class Model(BaseModel):
@@ -19,10 +23,20 @@ class Range(Model):
         return self
 
 
+class SourceIdentity(Model):
+    model_config = ConfigDict(strict=True)
+
+    document_id: str = Field(min_length=1)
+    version: str | None = Field(default=None, min_length=1)
+    uri: str | None = Field(default=None, min_length=1)
+    name: str | None = Field(default=None, min_length=1)
+
+
 class InputFile(Model):
     path: Path
     assets: dict[str, Path] = Field(default_factory=dict)
     encoding: str = "utf-8"
+    identity: SourceIdentity | None = None
 
 
 class FileRef(Model):
@@ -56,10 +70,53 @@ class PdfRegion(Model):
         return self
 
 
-Location = Annotated[TextSpan | PdfRegion, Field(discriminator="kind")]
+class PagePosition(Model):
+    kind: Literal["page"] = "page"
+    source: FileRef
+    number: int = Field(ge=1)
+
+
+class SlidePosition(Model):
+    kind: Literal["slide"] = "slide"
+    source: FileRef
+    number: int = Field(ge=1)
+
+
+class SheetPosition(Model):
+    kind: Literal["sheet"] = "sheet"
+    source: FileRef
+    name: str = Field(min_length=1)
+
+
+Location = Annotated[TextSpan | PdfRegion | PagePosition | SlidePosition | SheetPosition, Field(discriminator="kind")]
 
 
 class PipelineError(Exception):
     def __init__(self, stage: str, code: str, retryable: bool = False):
         super().__init__(code)
         self.stage, self.code, self.retryable = stage, code, retryable
+
+
+def line_ends(text: str) -> list[int]:
+    return [match.end() for match in NEWLINE.finditer(text)]
+
+
+def line_window(text: str, starts: list[int], first: int, last: int) -> str:
+    if not 1 <= first <= last <= len(starts):
+        raise ValueError("line range outside content")
+    end = starts[last] if last < len(starts) else len(text)
+    return text[starts[first - 1]:end]
+
+
+def line_range(ends: list[int], start: int, end: int) -> tuple[int, int]:
+    return bisect_right(ends, start) + 1, bisect_right(ends, max(start, end - 1)) + 1
+
+
+def merge_line_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    result = []
+    for first, last in sorted(ranges):
+        if result and first <= result[-1][1] + 1:
+            result[-1] = (result[-1][0], max(last, result[-1][1]))
+        else:
+            result.append((first, last))
+    return result

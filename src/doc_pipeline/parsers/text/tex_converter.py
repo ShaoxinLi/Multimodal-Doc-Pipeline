@@ -70,6 +70,8 @@ _SAFE_MACROS = (
 )
 
 _MATH_MACROS = {
+    "label",
+    "tag",
     "frac",
     "sqrt",
     "int",

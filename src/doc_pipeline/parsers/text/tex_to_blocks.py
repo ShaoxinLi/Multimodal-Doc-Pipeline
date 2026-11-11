@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from html import escape
 
 from pylatexenc.latexwalker import (
@@ -18,6 +18,7 @@ from pylatexenc.latexwalker import (
 )
 from pylatexenc.macrospec import EnvironmentSpec, MacroSpec, ParsedVerbatimArgs
 
+from doc_pipeline.contracts.core import Range
 from doc_pipeline.contracts.document import (
     Cell,
     Code,
@@ -135,6 +136,7 @@ def parse_tex(source: TextSource, resolve: AssetResolver) -> tuple[list[TextBloc
             MacroSpec("caption", "*[{"),
             MacroSpec("includegraphics", "*[{"),
             MacroSpec("label", "{"),
+            MacroSpec("tag", "*{"),
             MacroSpec("href", "[{{"),
             MacroSpec("lstinline", args_parser=_InlineListing()),
         ],
@@ -155,9 +157,22 @@ def parse_tex(source: TextSource, resolve: AssetResolver) -> tuple[list[TextBloc
     title: tuple[str, int, int] | None = None
     syntax_nodes = TexContentConverter(text)
 
-    def emit(a, b, payload, *, images=None, related=None):
+    def emit(a, b, payload, *, images=None, related=None, anchors=None):
         if text[a:b].strip():
-            records.append(TextBlock(a, b, payload, images=images or [], related_ranges=related or []))
+            records.append(TextBlock(a, b, payload, images=images or [], related_ranges=related or [],
+                                     anchors=anchors or []))
+
+    def anchors(items):
+        values = []
+        for child in items:
+            if not isinstance(child, LatexMacroNode) or child.macroname != "label":
+                continue
+            arg = final_argument(child)
+            if isinstance(arg, LatexGroupNode) and all(isinstance(n, LatexCharsNode) for n in arg.nodelist):
+                value = "".join(n.chars for n in arg.nodelist).strip()
+                if value:
+                    values.append(value)
+        return list(dict.fromkeys(values))
 
     def syntax(a, b):
         emit(a, b, Furniture(text="", role="syntax"))
@@ -367,7 +382,7 @@ def parse_tex(source: TextSource, resolve: AssetResolver) -> tuple[list[TextBloc
                     opaque(a, b, "unsupported TeX display math macro")
                 else:
                     body = raw[len(node.delimiters[0]) : -len(node.delimiters[1])].strip()
-                    emit(a, b, Equation(source=body))
+                    emit(a, b, Equation(source=body), anchors=anchors(node.nodelist))
                 continue
             if not isinstance(node, LatexEnvironmentNode):
                 opaque(a, b, "unsupported TeX node")
@@ -385,7 +400,7 @@ def parse_tex(source: TextSource, resolve: AssetResolver) -> tuple[list[TextBloc
                 node.nodelist, True
             ):
                 body = re.sub(r"^\\begin\{[^}]+\}|\\end\{[^}]+\}$", "", raw).strip()
-                emit(a, b, Equation(source=body))
+                emit(a, b, Equation(source=body), anchors=anchors(node.nodelist))
             elif name in {"verbatim", "verbatim*"}:
                 body = re.sub(r"^\\begin\{[^}]+\}|\\end\{[^}]+\}$", "", raw).strip("\r\n")
                 emit(a, b, Code(text=body))
@@ -396,10 +411,11 @@ def parse_tex(source: TextSource, resolve: AssetResolver) -> tuple[list[TextBloc
                 emit(a, b, Code(text=body, language=language and language[1]))
             elif name in {"figure", "figure*", "table", "table*", "tabular"}:
                 captions, refs, tables, reason = syntax_nodes.float_parts(node)
+                float_anchors = anchors(node.nodelist)
                 if name.startswith("figure") and not reason and refs and not tables:
                     images = [resolve(reference, "") for reference in refs]
                     if len(images) == 1 and images[0].file:
-                        emit(a, b, image_payload(images[0], captions))
+                        emit(a, b, image_payload(images[0], captions), anchors=float_anchors)
                     else:
                         rendered = [asset_html(image) for image in images]
                         rendered.extend(f"<p>{escape(caption)}</p>" for caption in captions)
@@ -407,7 +423,8 @@ def parse_tex(source: TextSource, resolve: AssetResolver) -> tuple[list[TextBloc
                             a,
                             b,
                             Text(markdown="\n".join(rendered), plain_text="\n".join(captions)),
-                            images=images,
+                            images=[replace(image, codepoints=Range(start=0, end=0)) for image in images],
+                            anchors=float_anchors,
                         )
                 elif (
                     not reason
@@ -424,7 +441,7 @@ def parse_tex(source: TextSource, resolve: AssetResolver) -> tuple[list[TextBloc
                         rows=[[Cell(text=cell) for cell in row] for row in rows],
                         captions=captions,
                     )
-                    emit(a, b, table)
+                    emit(a, b, table, anchors=float_anchors)
                 else:
                     opaque(a, b, reason or "unsupported TeX float or cell structure")
             elif name in {"em", "abstract"} | _LISTS | _QUOTES:

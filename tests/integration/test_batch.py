@@ -9,7 +9,7 @@ import httpx
 import pytest
 from docutils.parsers.rst import roles
 
-from doc_pipeline import Config, InputFile, PipelineError, pipeline, process_files
+from doc_pipeline import Artifact, Config, InputFile, PipelineError, pipeline, process_files
 from doc_pipeline.cli import main
 from doc_pipeline.contracts import run as run_contract
 from doc_pipeline.parsers.multimodal import client as provider_client
@@ -283,19 +283,21 @@ def test_timeout_preserves_completed_and_does_not_charge_downloads(tmp_path, mon
 
 
 def test_per_file_failures_leave_successful_sibling_and_clean_completion_markers(tmp_path, monkeypatch):
+    from doc_pipeline.artifacts import store
+
     source_pdf = write_source_pdf(tmp_path)
     monkeypatch.delenv("MINERU_API_KEY", raising=False)
-    original_write = pipeline.write_jsonl
+    original_install = store._install
 
-    def fail_write(path, rows):
-        if path.parent.parent.name.startswith(".doc-0006-"):
-            assert not (output / "0006").exists()
-            assert (path.parent / "content.md").is_file()
-            path.write_text("unfinished")
+    def fail_install(staging, destination):
+        if destination == output / "0006":
+            assert list(destination.iterdir()) == []
+            assert (staging / "content.md").is_file()
+            (staging / "chunks.jsonl").write_text("unfinished")
             raise OSError("private local path or error")
-        original_write(path, rows)
+        original_install(staging, destination)
 
-    monkeypatch.setattr(pipeline, "write_jsonl", fail_write)
+    monkeypatch.setattr(store, "_install", fail_install)
     service = BatchService(
         poll=lambda service: [service.row(1, "failed", err_msg="private provider error"), *service.done(2, 3, 4, 5)],
         upload_failure=0, download_failure=2, archives={3: b"invalid ZIP"},
@@ -415,7 +417,7 @@ def test_interrupted_batch_finishes_running_local_work_and_cancels_queue(tmp_pat
     original_parse = parser.parse_text_document
 
     def parse(source, *args, **kwargs):
-        if source.path == active:
+        if source.path.name == active.name:
             entered.set()
             assert release.wait(timeout=10)
         return original_parse(source, *args, **kwargs)
@@ -450,7 +452,7 @@ def test_empty_batch_rejected(tmp_path):
 
 
 @pytest.mark.parametrize("model", ["pipeline", "vlm"])
-def test_batch_sends_model_option_and_keeps_converted_geometry_out_of_output(tmp_path, monkeypatch, model):
+def test_batch_sends_model_option_and_keeps_converted_geometry_in_evidence(tmp_path, monkeypatch, model):
     source_pdf = write_source_pdf(tmp_path)
     monkeypatch.delenv("MINERU_API_KEY", raising=False)
     service = BatchService()
@@ -468,13 +470,14 @@ def test_batch_sends_model_option_and_keeps_converted_geometry_out_of_output(tmp
         "mineru_source_location_unresolved g0001-b0001 provider_block_match_ambiguous",
     ]
     assert chunks
+    artifact = Artifact.open(bundle)
     for chunk in chunks:
-        assert all(citation["locations"] == [] for citation in chunk["citations"])
-        [heading] = [citation for citation in chunk["citations"] if citation["role"] == "heading"]
-        assert heading["reason"] == "original_source_location_unverified"
-        assert chunk["metadata"]["source_locations"] == []
-        assert chunk["metadata"]["page_indices"] is None
-        assert chunk["metadata"]["page_coordinate_space"] is None
-        assert chunk["metadata"]["page_status"] == "unavailable"
-    assert {path.name for path in bundle.iterdir()} == {"content.md", "chunks.jsonl", "embeddings.jsonl", "report.json"}
+        assert chunk["citations"]["pages"] is None
+        assert chunk["citations"]["location_status"] == "unavailable"
+        selections, _ = artifact.evidence(chunk["id"])
+        [heading] = [item for item in selections.selections if item.role == "heading"]
+        assert heading.locations[0].path == "native/provider.pdf"
+        assert all(not item.locations for item in selections.selections if item.role == "body")
+    assert (bundle / "native" / "mineru.zip").is_file()
+    assert (bundle / "native" / "provider.pdf").is_file()
     assert "Pipeline probe section 1" in (bundle / "content.md").read_text()

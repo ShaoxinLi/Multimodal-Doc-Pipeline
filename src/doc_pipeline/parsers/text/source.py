@@ -3,9 +3,7 @@ from __future__ import annotations
 import re
 from bisect import bisect_right
 
-from doc_pipeline.contracts.core import FileRef, Range, TextSpan
-
-_NEWLINE = re.compile(r"\r\n|\r|\n")
+from doc_pipeline.contracts.core import NEWLINE, FileRef, Range, TextSpan, line_ends
 
 
 class TextSource:
@@ -13,9 +11,9 @@ class TextSource:
         self.original = original
         self.file = file
         self.bom = original.startswith("\ufeff")
-        self.text = _NEWLINE.sub("\n", original.removeprefix("\ufeff"))
-        self._original_lines = [0, *(match.end() for match in _NEWLINE.finditer(original))]
-        self._lines = [0, *(match.end() for match in re.finditer("\n", self.text))]
+        self.text = NEWLINE.sub("\n", original.removeprefix("\ufeff"))
+        self._original_lines = [0, *line_ends(original)]
+        self._lines = [0, *line_ends(self.text)]
 
     def line_offset(self, index: int) -> int:
         return self._lines[index] if index < len(self._lines) else len(self.text)

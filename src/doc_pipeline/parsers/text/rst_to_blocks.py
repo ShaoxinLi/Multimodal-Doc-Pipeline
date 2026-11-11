@@ -264,7 +264,7 @@ def parse_rst(source: TextSource, resolve: AssetResolver) -> tuple[list[TextBloc
                         role = "footnote"
                     else:
                         rendered = renderer.markdown(node)
-                    images = renderer.images_for(node)
+                    images = renderer.images_for(node, children=body if isinstance(node, nodes.footnote) else None)
                     if isinstance(node, nodes.list_item):
                         ordinal = node.parent.get("start", 1) + node.parent.index(node)
                         marker = f"{ordinal}. " if isinstance(node.parent, nodes.enumerated_list) else "- "
@@ -302,6 +302,7 @@ def parse_rst(source: TextSource, resolve: AssetResolver) -> tuple[list[TextBloc
                             else [renderer.markdown(node)]
                         )
                         rendered = "\n\n".join(fragments)
+                        atomic = True
                         content = "\n".join(
                             part
                             for part in [
@@ -350,7 +351,8 @@ def parse_rst(source: TextSource, resolve: AssetResolver) -> tuple[list[TextBloc
                 diagnostics.append(f"RST line {start + 1}: {node.tagname} overlaps previous record")
                 continue
             if payload is None:
-                payload = Text(plain_text=content, markdown=rendered, role=role, atomic=atomic)
+                payload = Text(plain_text=content, markdown=rendered, role=role,
+                               atomic=atomic or any(asset.codepoints is None for asset in images))
             records.append(TextBlock(a, b, payload, images=images))
 
     interpret(flat, len(lines))

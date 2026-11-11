@@ -95,7 +95,8 @@ class AssetResolver:
                     return missing, None
                 if not snapshot.is_relative_to(self.source_dir):
                     return "blocked_reference", None
-                if self.output_root != self.source_dir and snapshot.is_relative_to(self.output_root):
+                if any(root != self.source_dir and snapshot.is_relative_to(root)
+                       for root in (self.output_dir.resolve(), self.output_root)):
                     return "blocked_reference", None
             else:
                 snapshot = snapshot.resolve(strict=True)

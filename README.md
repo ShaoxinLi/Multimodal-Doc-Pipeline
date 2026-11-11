@@ -23,7 +23,7 @@ uv run doc-pipeline path/to/document --out path/to/output
 
 For a first run without credentials, use a [supported text format](#supported-formats). To process a PDF, Office file, or image, [set your MinerU key](#configure-mineru) first.
 
-The command prints a JSON report and writes `content.md`, `chunks.jsonl`, `embeddings.jsonl`, and `report.json` to the output directory. Embeddings are disabled by default, so `embeddings.jsonl` is empty.
+The command prints a JSON report and writes an artifact with the source snapshot, rendered Markdown, and chunks. Embeddings are disabled by default, so `embeddings.jsonl` is empty.
 
 Inspect the result:
 
@@ -222,6 +222,10 @@ report = process_file(
 
 | File | Contents |
 | --- | --- |
+| `document.json` | Artifact manifest and content digests |
+| `source/` | Captured input and explicit dependencies |
+| `blocks.jsonl`, `provenance.jsonl` | Block mappings and detailed chunk evidence |
+| `native/` | MinerU archive and retained provider evidence for remote inputs |
 | `content.md` | Parsed document in Markdown |
 | `chunks.jsonl` | Chunks with section context, metadata, and source citations |
 | `embeddings.jsonl` | Successful embedding vectors, empty when embeddings are disabled |
@@ -229,7 +233,7 @@ report = process_file(
 | `assets/` | Asset snapshots, when present |
 | `run.json` | Per-file results and report paths for batch runs |
 
-Citations refer to the original file. Page coordinates appear only when verified. See the [output format reference](docs/output-format.md) for field definitions and citation precision.
+Open the bundle with `Artifact.open(output, expected_id=report["artifact_id"])` to read verified chunks, context, evidence, source bytes, and media. [Output format](docs/output-format.md)
 
 ### Check a failed or partial run
 

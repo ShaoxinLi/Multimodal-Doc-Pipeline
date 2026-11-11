@@ -6,7 +6,7 @@ from urllib.parse import unquote, urlsplit
 from bs4 import BeautifulSoup, Comment, Declaration, Doctype, ProcessingInstruction
 from markdown_it import MarkdownIt
 
-from doc_pipeline.contracts.core import Range
+from doc_pipeline.contracts.core import Range, line_ends, line_range
 from doc_pipeline.contracts.document import (
     Algorithm,
     Block,
@@ -255,13 +255,11 @@ def render_markdown(parsed_content: ParsedContent) -> tuple[str, list[MarkdownMa
             block_id=block.id,
             markdown_range=Range(start=start, end=start + len(body)),
             first_line=line_number,
-            last_line_inclusive=line_number + sum(
-                match.end() <= max(0, len(body) - 1) for match in re.finditer(r"\r\n|\r|\n", body)
-            ),
+            last_line_inclusive=line_number + line_range(line_ends(body), 0, len(body))[1] - 1,
             relation="exact" if body == canonical else "enclosing",
         ))
         piece = body + "\n\n" if body else ""
         pieces.append(piece)
         offset += len(piece)
-        line_number += len(re.findall(r"\r\n|\r|\n", piece))
+        line_number += len(line_ends(piece))
     return "".join(pieces), mappings

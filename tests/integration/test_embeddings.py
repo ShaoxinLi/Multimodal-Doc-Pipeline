@@ -1,3 +1,4 @@
+import hashlib
 import json
 
 import httpx
@@ -58,7 +59,18 @@ def test_provider_indices_match_vectors_to_inputs_out_of_order(tmp_path, config)
         (0, "Alpha reference text."),
         (1, "Beta reference text."),
     ]
-    assert vectors == [{"chunk_id": 0, "vector": [1, 0]}, {"chunk_id": 1, "vector": [0, 1]}]
+    assert vectors == [
+        {
+            "chunk_id": chunk["id"],
+            "vector": vector,
+            "artifact_id": chunk["artifact_id"],
+            "input_sha256": hashlib.sha256(chunk["embedding_input"].encode()).hexdigest(),
+            "profile": {"model": "embed-test", "dimensions": 2, "requested_dimensions": 2,
+                        "encoding_format": "float",
+                        "endpoint_sha256": hashlib.sha256(b"https://embed.test/v1").hexdigest()},
+        }
+        for chunk, vector in zip(chunks, ([1, 0], [0, 1]), strict=True)
+    ]
 
 
 @pytest.mark.parametrize(
@@ -181,7 +193,7 @@ def test_bad_batch_preserves_successful_vectors_and_failure_reasons(tmp_path, co
     ]
     assert report["chunk_count"] == 3
     assert report["embedding_count"] == 1
-    assert vectors == [{"chunk_id": chunks[0]["id"], "vector": [1, 2]}]
+    assert [(item["chunk_id"], item["vector"]) for item in vectors] == [(chunks[0]["id"], [1, 2])]
     assert report["embedding_errors"] == [
         {"chunk_id": chunks[1]["id"], "code": "http_503", "retryable": True},
         {"chunk_id": chunks[2]["id"], "code": "http_413", "retryable": False},
@@ -201,7 +213,7 @@ def test_each_invocation_fetches_a_fresh_vector(tmp_path, config):
             output = tmp_path / str(index)
             process_file(source, output, config, client=client)
             _, _, vectors = read_output(output)
-            assert vectors == [{"chunk_id": 0, "vector": [index + 1, 0]}]
+            assert [(item["chunk_id"], item["vector"]) for item in vectors] == [(0, [index + 1, 0])]
 
 
 def test_opaque_content_is_retained_without_sending_it_for_embedding(tmp_path, config):
@@ -249,7 +261,10 @@ api_key = "file-token"
         process_file(source, output, Config.from_toml(path), client=client)
     report, _, vectors = read_output(output)
     assert report["embedding_errors"] == []
-    assert vectors == [{"chunk_id": 0, "vector": [1.0, 2.0, 3.0]}]
+    [result] = vectors
+    assert (result["chunk_id"], result["vector"]) == (0, [1.0, 2.0, 3.0])
+    assert result["profile"]["dimensions"] == 3
+    assert result["profile"]["requested_dimensions"] is None
     assert "api_key" not in report["embedding"]
     assert "file-token" not in (output / "report.json").read_text()
     assert "environment-token" not in (output / "report.json").read_text()

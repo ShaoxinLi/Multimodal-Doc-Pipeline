@@ -1,9 +1,11 @@
 import html
 import re
 from collections import Counter
+from dataclasses import replace
 
 from docutils import nodes
 
+from doc_pipeline.contracts.core import Range
 from doc_pipeline.contracts.document import Cell, Table
 from doc_pipeline.parsed_content.selection import table_cell_origins
 from doc_pipeline.parsers.text.assets import AssetResolver, asset_html, safe_link
@@ -121,9 +123,27 @@ class RstRenderer:
             return "\n\n".join(self.markdown(c) for c in node.children)
         raise ValueError(f"unsupported nested {node.tagname}")
 
-    def images_for(self, node):
+    def images_for(self, node, *, children=None):
+        def occurrences(element, start):
+            if isinstance(element, nodes.image):
+                yield element, Range(start=start, end=start + len(element.astext()))
+            elif isinstance(element, nodes.Element):
+                parts = [child.astext() for child in element.children]
+                separator = element.child_text_separator
+                if separator.join(parts) == element.astext():
+                    for child, part in zip(element.children, parts, strict=True):
+                        yield from occurrences(child, start)
+                        start += len(part) + len(separator)
+
+        if children is None:
+            spans = {id(image): span for image, span in occurrences(node, 0)}
+        else:
+            spans, offset = {}, 0
+            for child in children:
+                spans.update((id(image), span) for image, span in occurrences(child, offset))
+                offset += len(child.astext()) + 2
         return [
-            self.resolve(image["uri"], image.get("alt", ""))
+            replace(self.resolve(image["uri"], image.get("alt", "")), codepoints=spans.get(id(image)))
             for image in node.findall(nodes.image, include_self=True)
         ]
 

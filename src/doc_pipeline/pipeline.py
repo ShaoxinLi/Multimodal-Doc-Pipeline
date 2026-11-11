@@ -2,7 +2,7 @@ import re
 import tempfile
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -13,15 +13,29 @@ from PIL import Image, UnidentifiedImageError
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
+from doc_pipeline.artifacts.store import (
+    CapturedInput,
+    capture_source,
+    empty_destination,
+    publish,
+    retain_archive,
+    staging_directory,
+)
 from doc_pipeline.chunking.builder import make_chunks
-from doc_pipeline.chunking.citations import chunk_records
+from doc_pipeline.contracts.artifact import digest
 from doc_pipeline.contracts.config import Config, Limits
-from doc_pipeline.contracts.core import FileRef, InputFile, PipelineError
-from doc_pipeline.contracts.run import EmbeddingUsage, ExecutionRecord, ProgressCallback, RunClock
+from doc_pipeline.contracts.core import InputFile, PipelineError, SourceIdentity
+from doc_pipeline.contracts.run import (
+    EmbeddingUsage,
+    ExecutionRecord,
+    ProgressCallback,
+    ProgressEvent,
+    RunClock,
+)
 from doc_pipeline.parsed_content.md_renderer import render_markdown
 from doc_pipeline.parsers.multimodal.client import ArchiveFailure, ArchiveSuccess, obtain_archives
 from doc_pipeline.services.embeddings import embed_chunks
-from doc_pipeline.services.io import file_digest, write_bytes, write_json, write_jsonl
+from doc_pipeline.services.io import write_json, write_jsonl
 
 TEXT_FORMATS = {"md", "markdown", "txt", "rst", "tex", "latex"}
 IMAGE_FORMATS = {"png", "jpg", "jpeg", "jp2", "webp", "gif", "bmp"}
@@ -80,88 +94,58 @@ def validate_source(path: Path, filename: str, limits: Limits) -> str:
 
 @dataclass(frozen=True)
 class _Document:
-    source: InputFile
-    ref: FileRef
+    captured: CapturedInput
     kind: str
     output_dir: Path
+    staging: Path
     record: ExecutionRecord
     output_root: Path
 
 
-def _check_empty_directory(directory: Path) -> Path:
-    directory = directory.resolve()
-    if directory.exists() and any(directory.iterdir()):
-        raise PipelineError("intake", "output_not_empty")
-    return directory
-
-
 def _intake(source: InputFile, output_dir: Path, limits: Limits, record: ExecutionRecord,
-            *, output_root: Path | None = None) -> _Document:
+            scope: ExitStack, *, output_root: Path | None = None) -> _Document:
     record.progress("intake")
     with record.measure("intake"):
-        path = source.path
-        kind = validate_source(path, path.name, limits)
-        for asset in source.assets.values():
-            if asset.stat().st_size > limits.max_source_bytes:
-                raise PipelineError("intake", "asset_too_large")
-        output_dir = _check_empty_directory(output_dir)
-        ref = FileRef(path=str(path.resolve()), sha256=file_digest(path))
-    return _Document(source, ref, kind, output_dir, record, output_root or output_dir)
+        output_dir = output_dir.resolve()
+        existed = output_dir.exists()
+        if existed:
+            scope.enter_context(empty_destination(output_dir))
+        staging = scope.enter_context(staging_directory(output_dir))
+        captured = capture_source(source, staging, limits)
+        kind = validate_source(captured.input.path, source.path.name, limits)
+        if not existed:
+            scope.enter_context(empty_destination(output_dir))
+    return _Document(captured, kind, output_dir, staging, record, output_root or output_dir)
+
+
+def _remote_progress(documents: list[_Document], callback: ProgressCallback | None):
+    if callback is None:
+        return None
+    paths = {document.record.index: document.record.path for document in documents}
+
+    def emit(event: ProgressEvent) -> None:
+        callback(ProgressEvent(event.index, paths[event.index], event.stage, event.completed, event.total, event.failed))
+
+    return emit
 
 
 def _finalize(document: _Document, config: Config, client: httpx.Client,
               limits: Limits, archive: Path | None = None) -> dict:
-    destination, record = document.output_dir, document.record
-    with record.measure("write"):
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        preserve_directory = destination == document.output_root and destination.is_dir()
-        staging = tempfile.TemporaryDirectory(
-            prefix=f".doc-{record.index + 1:04d}-",
-            dir=destination if preserve_directory else destination.parent,
-        )
-    with staging as temporary:
-        output_dir = Path(temporary) / "bundle"
-        with record.measure("write"):
-            output_dir.mkdir()
-        report = _write_document(document, output_dir, config, client, limits, archive)
-        with record.measure("write"):
-            if preserve_directory:
-                _publish_into_directory(output_dir, destination)
-            else:
-                output_dir.replace(destination)
-    return report
-
-
-def _publish_into_directory(bundle: Path, destination: Path) -> None:
-    if any(path != bundle.parent for path in destination.iterdir()):
-        raise PipelineError("write", "output_not_empty")
-    report = bundle / "report.json"
-    artifacts = [path for path in bundle.iterdir() if path != report]
-    published = []
-    try:
-        for path in [*artifacts, report]:
-            path.rename(destination / path.name)
-            published.append(path)
-    except (OSError, KeyboardInterrupt):
-        for path in reversed(published):
-            (destination / path.name).rename(path)
-        raise
-
-
-def _write_document(document: _Document, output_dir: Path, config: Config, client: httpx.Client,
-                    limits: Limits, archive: Path | None) -> dict:
-    record = document.record
+    output_dir, record = document.output_dir, document.record
+    captured, staging = document.captured, document.staging
     record.progress("parse")
     with record.measure("parse"):
         if archive is None:
             from doc_pipeline.parsers.text.parser import parse_text_document
 
-            parsed = parse_text_document(document.source, document.ref, output_dir,
+            parsed = parse_text_document(captured.input, captured.ref, staging, source_dir=captured.original_path.parent,
                                          max_asset_bytes=limits.max_source_bytes, output_root=document.output_root)
         else:
             from doc_pipeline.parsers.multimodal.parser import decode_archive
 
-            parsed = decode_archive(document.ref, archive, output_dir, limits, source_type=document.kind)
+            retained = retain_archive(archive, staging, limits)
+            parsed = decode_archive(captured.ref, retained, staging, limits, source_type=document.kind,
+                                    original_path=captured.input.path)
         record.parse_status = parsed.parse_status
     with record.measure("render"):
         markdown, mappings = render_markdown(parsed)
@@ -169,26 +153,37 @@ def _write_document(document: _Document, output_dir: Path, config: Config, clien
         chunks = make_chunks(parsed, mappings, config)
         record.chunk_count = len(chunks)
     with record.measure("write"):
-        write_bytes(output_dir / "content.md", markdown.encode())
-        write_jsonl(output_dir / "chunks.jsonl", chunk_records(
-            chunks, source=document.ref, source_type=document.kind, parsed=parsed,
-        ))
+        manifest = publish(staging, output_dir, captured, document.kind, parsed, markdown, mappings, chunks,
+                           config, remote=archive is not None)
     vectors, errors = [], []
     if config.embedding is not None:
         with record.measure("embedding"):
             vectors, errors, record.embedding_usage = embed_chunks(
                 chunks, config, client, on_progress=partial(record.progress, "embedding"),
             )
+            profile = config.embedding
+            for vector in vectors:
+                chunk = chunks[vector["chunk_id"]]
+                vector.update(
+                    artifact_id=manifest.artifact_id,
+                    input_sha256=digest(chunk.embedding_input.encode()),
+                    profile={
+                        "model": profile.model, "dimensions": len(vector["vector"]),
+                        "requested_dimensions": profile.dimensions, "encoding_format": "float",
+                        "endpoint_sha256": digest(profile.api_base_url.encode()),
+                    },
+                )
             record.embedding_count = len(vectors)
             record.embedding_error_count = len(errors)
     with record.measure("write"):
         write_jsonl(output_dir / "embeddings.jsonl", vectors)
     report = {
-        "source": document.ref.model_dump(),
+        "source": {"path": str(captured.original_path), "sha256": captured.ref.sha256},
+        "artifact_id": manifest.artifact_id,
         "parse_status": parsed.parse_status,
         "chunk_count": record.chunk_count,
         "chunking": config.chunking.model_dump(),
-        "embedding": config.embedding.model_dump() if config.embedding else None,
+        "embedding": config.embedding.model_dump(include={"model", "dimensions"}) if config.embedding else None,
         "embedding_count": record.embedding_count,
         "embedding_errors": errors,
         "diagnostics": parsed.diagnostics,
@@ -229,21 +224,23 @@ def _finish_remote(document: _Document, outcome: ArchiveSuccess | ArchiveFailure
 
 def process_file(path: Path, output_dir: Path, config: Config | None = None, *,
                  assets: dict[str, Path] | None = None, encoding: str = "utf-8",
-                 client: httpx.Client | None = None,
+                 identity: SourceIdentity | None = None, client: httpx.Client | None = None,
                  on_progress: ProgressCallback | None = None) -> dict:
     config = config or Config()
     limits = Limits()
     record = ExecutionRecord(RunClock(), 0, path=path, on_progress=on_progress)
     try:
-        source = InputFile(path=path, assets=assets or {}, encoding=encoding)
-        document = _intake(source, output_dir, limits, record)
-        with _http_client(client, config) as http:
+        with ExitStack() as scope:
+            source = InputFile(path=path, assets=assets or {}, encoding=encoding, identity=identity)
+            document = _intake(source, output_dir, limits, record, scope)
+            http = scope.enter_context(_http_client(client, config))
             if document.kind in TEXT_FORMATS:
                 report = _finalize(document, config, http, limits)
             else:
                 with tempfile.TemporaryDirectory(prefix="doc-pipeline-") as temporary:
                     [outcome] = obtain_archives(
-                        [(0, source)], config, http, Path(temporary), on_progress=on_progress,
+                        [(0, document.captured.input)], config, http, Path(temporary),
+                        on_progress=_remote_progress([document], on_progress),
                     )
                     report = _finish_remote(document, outcome, config, http, limits)
     except (PipelineError, OSError, ValueError) as error:
@@ -278,8 +275,12 @@ def process_files(paths: Iterable[Path | InputFile], output_dir: Path, config: C
     if not inputs:
         raise PipelineError("intake", "no_input_files")
     clock = RunClock()
-    output_dir = _check_empty_directory(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    with ExitStack() as scope:
+        output_dir = scope.enter_context(empty_destination(output_dir))
+        return _process_batch(inputs, output_dir, config, client, on_progress, clock, scope)
+
+
+def _process_batch(inputs, output_dir, config, client, on_progress, clock, scope) -> dict:
     limits = Limits()
     files: dict[int, dict] = {}
     local: list[_Document] = []
@@ -302,7 +303,7 @@ def process_files(paths: Iterable[Path | InputFile], output_dir: Path, config: C
         record = ExecutionRecord(RunClock(run_id=clock.run_id), index, path=path, on_progress=on_progress)
         try:
             source = item if isinstance(item, InputFile) else InputFile(path=item)
-            document = _intake(source, output_dir / f"{index + 1:04d}", limits, record,
+            document = _intake(source, output_dir / f"{index + 1:04d}", limits, record, scope,
                                output_root=output_dir)
         except (PipelineError, OSError, ValueError) as error:
             record.fail(error)
@@ -320,13 +321,14 @@ def process_files(paths: Iterable[Path | InputFile], output_dir: Path, config: C
             for start in range(0, len(remote), size):
                 group = remote[start:start + size]
                 with tempfile.TemporaryDirectory(prefix="doc-pipeline-") as temporary:
-                    outcomes = obtain_archives([(item.record.index, item.source) for item in group],
-                                               config, http, Path(temporary), on_progress=on_progress)
+                    outcomes = obtain_archives([(item.record.index, item.captured.input) for item in group],
+                                               config, http, Path(temporary),
+                                               on_progress=_remote_progress(group, on_progress))
                     for document, outcome in zip(group, outcomes, strict=True):
                         report = _process_document(document, config, http, limits, outcome)
-                        collect(document.record, document.source.path, report)
+                        collect(document.record, document.record.path, report)
             for document, future in zip(local, local_futures, strict=True):
-                collect(document.record, document.source.path, future.result())
+                collect(document.record, document.record.path, future.result())
         finally:
             pool.shutdown(wait=True, cancel_futures=True)
 

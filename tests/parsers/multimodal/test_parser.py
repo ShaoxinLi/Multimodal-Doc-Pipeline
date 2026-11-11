@@ -1,10 +1,15 @@
+import hashlib
+import json
+from zipfile import ZipFile
+
 import pytest
 
-from doc_pipeline.contracts.core import PipelineError
+from doc_pipeline.contracts.config import Limits
+from doc_pipeline.contracts.core import FileRef, PipelineError
 from doc_pipeline.contracts.document import Block, Heading
 from doc_pipeline.parsed_content.selection import canonical_text
-from doc_pipeline.parsers.multimodal.parser import restore_numbered_subsections
-from tests.parsers.multimodal.support import _content_archive, _decode, _zip
+from doc_pipeline.parsers.multimodal.parser import decode_archive, restore_numbered_subsections
+from tests.parsers.multimodal.support import _content_archive, _decode, _zip, exported_rows
 from tests.support import document_archive, pdf_bytes
 
 
@@ -23,7 +28,7 @@ def test_repeated_paragraphs_keep_content_without_claiming_ambiguous_locations(t
         [region] = block.locations
         assert block.location_precision == "enclosing"
         assert region.page_index == page
-        assert region.source.path == "provider.pdf"
+        assert region.source.path == "native/provider.pdf"
     for block in (first_paragraph, second_paragraph):
         assert canonical_text(block) == "Repeated paragraph."
         assert block.locations == []
@@ -123,3 +128,60 @@ def test_validated_slide_type_survives_a_resolved_source_without_an_extension(tm
     parsed = decode_archive(FileRef(path="resolved/bytes", sha256="0" * 64), archive, tmp_path / "bundle",
                             Limits(), source_type="ppt")
     assert [block.semantic_scope for block in parsed.blocks] == [0, 1]
+
+
+def _text(kind, value, **extra):
+    return {"type": kind, "content": {f"{kind}_content": [{"type": "text", "content": value}], **extra}}
+
+
+def _office(tmp_path, suffix, groups, *, matching=True):
+    path = tmp_path / f"source.{suffix}"
+    with ZipFile(path, "w") as source:
+        if suffix == "pptx":
+            relation = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+            source.writestr("ppt/presentation.xml", f"""<presentation xmlns:r="{relation}">
+                <sldIdLst><sldId r:id="r1"/><sldId r:id="r2"/></sldIdLst></presentation>""")
+            source.writestr("ppt/_rels/presentation.xml.rels", f"""<Relationships>
+                <Relationship Id="r1" Target="slides/one.xml" Type="{relation}/slide"/>
+                <Relationship Id="r2" Target="slides/two.xml" Type="{relation}/slide"/>
+                </Relationships>""")
+            for name, unique in (("one", "ALPHA"), ("two", "BETA")):
+                source.writestr(f"ppt/slides/{name}.xml", f"<sld><t>Shared</t><t>{unique}</t></sld>")
+        else:
+            source.writestr("xl/workbook.xml", '<workbook><sheets><sheet name="One"/><sheet name="Two"/></sheets></workbook>')
+    original = path.read_bytes()
+    ref = FileRef(path=f"source/original.{suffix}", sha256=hashlib.sha256(original).hexdigest())
+    archive = tmp_path / "archive.zip"
+    with ZipFile(archive, "w") as raw:
+        raw.writestr(f"office_origin.{suffix}", original if matching else original + b"changed")
+        raw.writestr("office_content_list_v2.json", json.dumps(groups))
+    return decode_archive(ref, archive, tmp_path / "out", Limits(), original_path=path), ref
+
+
+@pytest.mark.parametrize("variant", ["ordered", "swapped", "changed-origin", "ambiguous"])
+def test_pptx_uses_matching_origin_and_all_nested_unique_text(tmp_path, variant):
+    def group(unique):
+        return [_text("title", "Shared", level=1), {"type": "list", "content": {
+            "list_items": [{"item_content": [{"type": "text", "content": unique}]}],
+        }}]
+    groups = [group("ALPHA"), group("BETA")]
+    if variant == "swapped":
+        groups.reverse()
+    if variant == "ambiguous":
+        groups = [[_text("title", "Shared", level=1)]] * 2
+    parsed, ref = _office(tmp_path, "pptx", groups, matching=variant != "changed-origin")
+    rows = exported_rows(parsed, ref, "pptx")
+    if variant == "ordered":
+        assert [row.citations.slides for row in rows] == [[1], [2]]
+        assert all(row.citations.location_status == "known" for row in rows)
+    else:
+        assert all(row.citations.slides is None for row in rows)
+
+
+def test_xlsx_only_reports_verified_sheet_names(tmp_path):
+    groups = [[_text("title", name, level=1), _text("paragraph", f"Values on {name}.")] for name in ("One", "Two")]
+    parsed, ref = _office(tmp_path, "xlsx", groups)
+    assert all(loc.kind == "sheet" for block in parsed.blocks for loc in block.locations)
+    rows = exported_rows(parsed, ref, "xlsx")
+    assert [(item.name, item.cells) for row in rows for item in row.citations.sheets] == [("One", None), ("Two", None)]
+    assert all(row.citations.location_status == "known" for row in rows)
