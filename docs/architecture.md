@@ -69,9 +69,9 @@ Parsing completeness and citation precision therefore answer different questions
 
 For batches, local documents run in a thread pool controlled by `local_workers`. Remote documents are submitted in groups controlled by `mineru.batch_size`. Local work can overlap remote acquisition. The final `run.json` preserves input order regardless of completion order.
 
-Caught failures belong to individual files, so one failed document does not stop the remaining batch. Embedding failures are recorded per chunk and leave parsed content available. The Python single-file API raises fatal processing errors. The batch API records caught file errors in `run.json`.
+Caught failures belong to individual files, so one failed document does not stop the remaining batch. Embedding failures are recorded per chunk and leave parsed content available. A successful embedding response with missing vectors or repeated input indices triggers one resend of the same batch. If that resend fails, processing continues with the next batch. The Python single-file API raises fatal processing errors. The batch API records caught file errors in `run.json`.
 
-Each run requires an empty or nonexistent output directory. There is no resume or overwrite mode. Reports are replaced atomically, but the entire output directory is not a transaction. A fatal failure can leave assets or earlier output files without a `report.json`. An interrupted batch may have no final `run.json`.
+Each run requires an empty or nonexistent output directory. There is no resume or overwrite mode. Each document writes to a temporary sibling directory and publishes the whole bundle by renaming it after the report is ready. A caught file failure discards that temporary bundle. A sudden process stop can leave temporary files, and an interrupted batch may have no final `run.json`.
 
 ## Where responsibilities live
 

@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
@@ -70,8 +71,10 @@ RETRY_DELAY_SECONDS = 1
 
 def request_json(client: httpx.Client, stage: str, method: str, url: str,
                  *, timeout: float, deadline: float | None = None, retry_transport: bool = True,
+                 retry_response_once: Callable[[dict], bool] | None = None,
                  **kwargs):
-    for attempt in range(RETRY_ATTEMPTS):
+    response_retried = False
+    for attempt in range(RETRY_ATTEMPTS + int(retry_response_once is not None)):
         try:
             with suppress_http_logging():
                 response = client.request(method, url, auth=None, follow_redirects=False,
@@ -84,6 +87,9 @@ def request_json(client: httpx.Client, stage: str, method: str, url: str,
                 raise PipelineError(stage, "invalid_provider_response") from None
             if not isinstance(value, dict):
                 raise PipelineError(stage, "invalid_provider_response")
+            if retry_response_once is not None and retry_response_once(value) and not response_retried:
+                response_retried = True
+                continue
             return value
         except httpx.TransportError:
             error = PipelineError(stage, "transport_error", True)
@@ -93,7 +99,7 @@ def request_json(client: httpx.Client, stage: str, method: str, url: str,
             raise PipelineError(stage, "invalid_provider_response") from None
         except PipelineError as exc:
             error = exc
-        if not error.retryable or attempt + 1 == RETRY_ATTEMPTS:
+        if not error.retryable or response_retried or attempt + 1 == RETRY_ATTEMPTS:
             raise error
         time.sleep(bounded_timeout(RETRY_DELAY_SECONDS * 2 ** attempt, deadline))
 

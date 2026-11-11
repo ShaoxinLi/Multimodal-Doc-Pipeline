@@ -54,6 +54,7 @@ def embed_chunks(chunks: list[Chunk], config: Config, client, *,
 
     def request_batch(batch):
         nonlocal dimensions
+        incomplete = False
         try:
             key = api_key("EMBEDDING_API_KEY", profile.api_key)
             if not key:
@@ -62,14 +63,26 @@ def embed_chunks(chunks: list[Chunk], config: Config, client, *,
                        "encoding_format": "float"}
             if profile.dimensions is not None:
                 payload["dimensions"] = profile.dimensions
+
+            def observe_response(response: dict) -> bool:
+                nonlocal incomplete
+                usage.observe(response.get("usage"))
+                rows = response.get("data")
+                if response.get("model") != profile.model or not isinstance(rows, list):
+                    return False
+                indices = [row.get("index") for row in rows if isinstance(row, dict)]
+                valid_indices = [index for index in indices if type(index) is int and index in range(len(batch))]
+                incomplete = len(rows) < len(batch) or len(set(valid_indices)) < len(valid_indices)
+                return incomplete
+
             response = request_json(client, "embedding", "POST", profile.api_base_url + "/embeddings",
                                     timeout=config.request_timeout_seconds,
+                                    retry_response_once=observe_response,
                                     headers={"Authorization": "Bearer " + key}, json=payload)
-            usage.observe(response.get("usage"))
             values = validate_vectors(response, len(batch), profile, dimensions)
             dimensions = len(values[0])
         except PipelineError as error:
-            if error.code in {"http_400", "http_413", "http_422"} and len(batch) > 1:
+            if not incomplete and error.code in {"http_400", "http_413", "http_422"} and len(batch) > 1:
                 middle = len(batch) // 2
                 request_batch(batch[:middle])
                 request_batch(batch[middle:])

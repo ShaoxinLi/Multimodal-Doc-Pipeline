@@ -210,7 +210,7 @@ The three status concepts are independent.
 
 Embedding disabled, an empty document, or missing citation coordinates can still produce `status: "complete"`. A partial document can still contain usable chunks and vectors.
 
-A fatal single-file error raises an exception instead of returning a report. A caught batch file error is recorded in `run.json`. Earlier assets or data files can remain after failure, so their presence alone does not establish success. Reports use atomic replacement, but the output directory as a whole does not. Interruption or a failure outside per-file processing can prevent the final batch report.
+A fatal single-file error raises an exception instead of returning a report. A caught batch file error is recorded in `run.json`. The pipeline publishes each document directory only after its report and output files are ready. Interruption or a failure outside per-file processing can prevent the final batch report.
 
 The CLI prints a summary to stdout in a terminal and JSON when stdout is redirected. Use `--format text` or `--format json` to choose the format. Text-mode errors go to stderr. Progress also goes to stderr and appears by default when stderr is a terminal. Use `--progress` or `--no-progress` to override the default.
 

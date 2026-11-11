@@ -169,7 +169,7 @@ def test_multimodal_render_failure_leaves_no_converted_pdf(tmp_path, config, mon
         with pytest.raises(PipelineError, match="test_render_failure"):
             process_file(source_pdf, output, config, client=client)
 
-    assert list(output.iterdir()) == []
+    assert not output.exists()
 
 
 @pytest.mark.parametrize(

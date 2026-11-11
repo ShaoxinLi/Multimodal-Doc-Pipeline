@@ -6,6 +6,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
+from stat import S_IMODE
 from zipfile import BadZipFile, ZipFile
 
 import httpx
@@ -88,11 +89,10 @@ class _Document:
     output_root: Path
 
 
-def _empty_directory(directory: Path) -> Path:
+def _check_empty_directory(directory: Path) -> Path:
     directory = directory.resolve()
     if directory.exists() and any(directory.iterdir()):
         raise PipelineError("intake", "output_not_empty")
-    directory.mkdir(parents=True, exist_ok=True)
     return directory
 
 
@@ -105,14 +105,32 @@ def _intake(source: InputFile, output_dir: Path, limits: Limits, record: Executi
         for asset in source.assets.values():
             if asset.stat().st_size > limits.max_source_bytes:
                 raise PipelineError("intake", "asset_too_large")
-        output_dir = _empty_directory(output_dir)
+        output_dir = _check_empty_directory(output_dir)
         ref = FileRef(path=str(path.resolve()), sha256=file_digest(path))
     return _Document(source, ref, kind, output_dir, record, output_root or output_dir)
 
 
 def _finalize(document: _Document, config: Config, client: httpx.Client,
               limits: Limits, archive: Path | None = None) -> dict:
-    output_dir, record = document.output_dir, document.record
+    destination, record = document.output_dir, document.record
+    with record.measure("write"):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        staging = tempfile.TemporaryDirectory(prefix=f".doc-{record.index + 1:04d}-", dir=destination.parent)
+    with staging as temporary:
+        output_dir = Path(temporary) / "bundle"
+        with record.measure("write"):
+            output_dir.mkdir()
+        report = _write_document(document, output_dir, config, client, limits, archive)
+        with record.measure("write"):
+            if destination.exists():
+                output_dir.chmod(S_IMODE(destination.stat().st_mode))
+            output_dir.replace(destination)
+    return report
+
+
+def _write_document(document: _Document, output_dir: Path, config: Config, client: httpx.Client,
+                    limits: Limits, archive: Path | None) -> dict:
+    record = document.record
     record.progress("parse")
     with record.measure("parse"):
         if archive is None:
@@ -240,7 +258,8 @@ def process_files(paths: Iterable[Path | InputFile], output_dir: Path, config: C
     if not inputs:
         raise PipelineError("intake", "no_input_files")
     clock = RunClock()
-    output_dir = _empty_directory(output_dir)
+    output_dir = _check_empty_directory(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
     limits = Limits()
     files: dict[int, dict] = {}
     local: list[_Document] = []

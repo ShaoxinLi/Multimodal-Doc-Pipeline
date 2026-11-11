@@ -288,7 +288,10 @@ def test_per_file_failures_leave_successful_sibling_and_clean_completion_markers
     original_write = pipeline.write_jsonl
 
     def fail_write(path, rows):
-        if path.parent.name == "0006":
+        if path.parent.parent.name.startswith(".doc-0006-"):
+            assert not (output / "0006").exists()
+            assert (path.parent / "content.md").is_file()
+            path.write_text("unfinished")
             raise OSError("private local path or error")
         original_write(path, rows)
 
@@ -312,6 +315,7 @@ def test_per_file_failures_leave_successful_sibling_and_clean_completion_markers
         "private local path or error", "private provider error", "private download error",
     ))
     assert list(output.glob("*/report.json")) == [output / "0007" / "report.json"]
+    assert {path.name for path in output.iterdir()} == {"0007", "run.json"}
 
 
 @pytest.mark.parametrize("workers", [1, 2, 4])
@@ -434,7 +438,7 @@ def test_interrupted_batch_finishes_running_local_work_and_cancels_queue(tmp_pat
     assert main(arguments) == 130
     assert json.loads(capsys.readouterr().out) == {"error": "interrupted"}
     assert (output / "0001" / "report.json").is_file()
-    assert list((output / "0002").iterdir()) == []
+    assert not (output / "0002").exists()
     assert not (output / "run.json").exists()
 
 

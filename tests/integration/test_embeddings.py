@@ -76,9 +76,11 @@ def test_provider_indices_match_vectors_to_inputs_out_of_order(tmp_path, config)
 def test_invalid_provider_response_cannot_publish_vectors(tmp_path, config, model, rows):
     source = source_text(tmp_path, "Alpha", "Beta")
     output = tmp_path / "out"
+    requests = []
 
     def handle(request):
         assert len(embed_request(request)["input"]) == 2
+        requests.append(request.content)
         return httpx.Response(200, content=json.dumps({"model": model, "data": rows}))
 
     with httpx.Client(transport=httpx.MockTransport(handle)) as client:
@@ -92,6 +94,60 @@ def test_invalid_provider_response_cannot_publish_vectors(tmp_path, config, mode
         {"chunk_id": chunk_id, "code": "invalid_embedding_response", "retryable": False}
         for chunk_id in (0, 1)
     ]
+    retry_expected = len(rows) < 2 or rows[0]["index"] == rows[1]["index"]
+    assert requests == [requests[0]] * (2 if retry_expected else 1)
+
+
+@pytest.mark.parametrize("recovers", [True, False])
+def test_incomplete_vectors_retry_preserves_other_batches(tmp_path, config, recovers):
+    source = source_text(tmp_path, *(f"Section {index}" for index in range(11)))
+    output = tmp_path / "out"
+    requests = []
+
+    def handle(request):
+        body = embed_request(request)
+        requests.append(request.content)
+        rows = [row(index, [1, 2]) for index in range(len(body["input"]))]
+        if len(requests) == 1 or (len(requests) == 2 and not recovers):
+            rows.pop()
+        return httpx.Response(200, json={"model": body["model"], "data": rows})
+
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        process_file(source, output, config, client=client)
+
+    assert len(requests) == 3
+    assert requests[0] == requests[1]
+    report, chunks, vectors = read_output(output)
+    assert len(chunks) == 11
+    assert [vector["chunk_id"] for vector in vectors] == (list(range(11)) if recovers else [10])
+    assert [error["chunk_id"] for error in report["embedding_errors"]] == ([] if recovers else list(range(10)))
+
+
+@pytest.mark.parametrize("retry_status", [200, 413, 503])
+def test_incomplete_vectors_get_one_resend_after_network_retries(tmp_path, config, monkeypatch, retry_status):
+    monkeypatch.setattr("doc_pipeline.services.io.time.sleep", lambda _: None)
+    source = source_text(tmp_path, "Alpha", "Beta")
+    output = tmp_path / "out"
+    requests = []
+
+    def handle(request):
+        embed_request(request)
+        requests.append(request.content)
+        if len(requests) <= 2:
+            return httpx.Response(503)
+        if len(requests) == 3:
+            return httpx.Response(200, json={"model": "embed-test", "data": [row(0, [1, 2])]})
+        assert len(requests) == 4
+        return httpx.Response(retry_status, json={"model": "embed-test", "data": [row(0, [1, 2]), row(1, [2, 1])]})
+
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        report = process_file(source, output, config, client=client)
+
+    assert requests == [requests[0]] * 4
+    assert report["embedding_count"] == (2 if retry_status == 200 else 0)
+    assert [error["code"] for error in report["embedding_errors"]] == (
+        [] if retry_status == 200 else [f"http_{retry_status}"] * 2
+    )
 
 
 def test_bad_batch_preserves_successful_vectors_and_failure_reasons(tmp_path, config):
