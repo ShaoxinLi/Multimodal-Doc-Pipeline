@@ -1,0 +1,1002 @@
+% Compared results of Briot-Bouquet, Painlev\'e, Nevanlinna
+\documentclass[10pt]{article}
+%http://www.grappa.univ-lille3.fr/FAQ-LaTeX/6.48.html
+%http://ctan.tetaneutral.net/macros/latex/contrib/changebar/changebar.pdf
+%http://mirrors.ctan.org/macros/latex/contrib/changebar/README maintained, 2018
+% LaTex=>DVI=>PDF ignores changebar
+% LaTex=>PDF      accepts changebar
+
+\usepackage[outerbars]{changebar} % permet de positionner les
+%usepackage           {changebar} % permet de positionner les
+                                  % barres en marge externe
+\setcounter{changebargrey}{70} % gris niveau de gris des barres
+\setcounter{changebargrey}{5}  % noir niveau de gris des barres
+\setcounter{changebargrey}{20} % noir niveau de gris des barres
+
+%\usepackage{lscape} % landscape
+\usepackage{color} % statements \color
+\usepackage{comment} % http://tex.stackexchange.com/questions/11177/how-to-write-hidden-notes-in-a-latex-file
+\usepackage{amssymb}
+\usepackage{amsmath}
+\usepackage{ulem}
+\usepackage{tikz-cd}
+
+
+%\usepackage{CJK}
+%\usepackage{amsmath}
+%\usepackage{amssymb}
+%\usepackage{mathrsfs}
+%\usepackage{amsthm}
+%\usepackage{graphicx}
+%\usepackage{color}
+%\usepackage[all]{xy}
+%\usepackage{extarrows}
+%\usepackage{amsmath}
+%\usepackage{amsthm}
+%\usepackage{amsfonts}
+%\usepackage{amssymb}
+%\usepackage{mathrsfs}
+%\usepackage{amstext}
+%\usepackage{amsopn}
+
+
+\textwidth =15.0 truecm
+\textheight=24.0 truecm
+\textheight=24.0 truecm
+\voffset   =-2.5 truecm
+\voffset   =-2.5 truecm
+\hoffset   =-2.5 truecm
+
+\def\today{8 August 2022} % please update if you modify this file
+
+% ***************************************************** PERSONAL MACROS, START
+% ----------------------------------------------- Abr\'eviations fran\c caises
+\def \Lecons{Le\c cons}
+\def\AnnENS{Ann.~\'Ec.~Norm.~}
+% ------------------------------------------------------ English abbreviations
+\def \ie {i.e.~}
+\def\LHS{lhs~}
+% ----------------------------------------------------- Mathematical functions
+\def \ccomma{\raise 2pt\hbox{,}} % Le petit livre de TeX page 234
+\def \D {\hbox{d}}
+\def \Dtotal {\hbox{D}}
+\def \bigD {\hbox{D}}
+
+
+\def\N{\mathbb N}
+\def\Z{\mathbb Z}	
+\def\Q{\mathbb Q}
+\def\R{\mathbb R}
+\def\C{\mathbb C}
+\def\S{\mathcal S}
+\def\P{\mathbb P}
+%\def\D{\mathbb D}
+
+\def \NDLR#1 {\hfill\break\noindent NDLR \textbf{#1}\hfill\break\noindent}
+
+% ----------------------------------------------------------------- Journals
+
+% ***************************************************** PERSONAL MACROS, END
+
+%\makeindex
+
+\begin{document}
+
+\title{Equivalence of two canonical lists of elliptic functions}
+
+\author{Robert Conte
+{}\\
+\\ 1. Universit\'e Paris-Saclay, ENS Paris-Saclay, CNRS,
+\\    Centre Borelli, F-91190 Gif-sur-Yvette, France
+\\
+\\ 2. Department of mathematics, The University of Hong Kong,
+\\ Pokfulam road, Hong Kong
+\\    E-mail Robert.Conte@cea.fr, ORCID https://orcid.org/0000-0002-1840-5095
+{}\\
+%}
+%\author{
+ Liangwen Liao
+{}\\
+Department of Mathematics, Nanjing University, Nanjing, China
+\\    E-mail maliao@nju.edu.cn,   ORCID https://orcid.org/0000-0002-3337-5146
+{}\\
+%}
+%\author{
+ Chengfa Wu
+{}\\
+Institute for Advanced Study, Shenzhen University, Shenzhen, China
+\\    E-mail cfwu@szu.edu.cn, ORCID https://orcid.org/0000-0003-1697-4654
+{}\\
+}
+
+\date{}
+
+\maketitle
+
+\hfill % \today
+
+{\vglue -10.0 truemm}
+{\vskip -10.0 truemm}
+
+%\begin{abstract}
+%A short comparison of the respective achievements of the Painlev\'e school
+%and of the Nevanlinna school.
+%\end{abstract}
+
+\begin{abstract}
+We establish a one-to-one correspondence between,
+on one hand
+the four types of trans\-cendental meromorphic solutions
+of the autonomous Schwarzian differential
+equations which are elliptic,
+on the other hand
+the four binomial equations of Briot and Bouquet possessing an elliptic solution.
+\end{abstract}
+
+%\noindent \textit{Running title}:
+
+%\noindent \textit{Keywords}:
+%sixth Painlev\'e equation,
+%Lax pair.
+
+%\noindent \textit{PACS}
+% (cosmology, general relativity, nonlinear ODEs, quantum gravity)
+% 02.30.+g   % Mathematical methods in physics
+            %   Function theory, analysis
+
+%baselineskip= 8truept
+%baselineskip=10truept % 64 pages
+\baselineskip=12truept % 68 pages
+
+% FOR DOUBLE-SPACING, REMOVE THE TWO FOLLOWING %
+%\baselineskip=24truept
+%\renewcommand{\baselinestretch}{2.0}
+%\vfill\eject
+%\tableofcontents
+\vfill\eject
+
+% ============================================================================
+% ============================================================================
+%\section{Introduction}
+
+% ============================================================================
+% ============================================================================
+%\section{Elliptic binomial equations}
+
+When looking for first order ordinary differential equations (ODEs)
+whose general solution is singlevalued,
+Briot and Bouquet   \cite{BriotBouquet,Hille}  enumerated and integrated all
+first order binomial equations having such a property,
+\begin{eqnarray} \label{first-order ODE}
+& & \left(\frac{\D u}{\D z}\right)^k = R(u),
+\label{eqBB-Binomial}
+\end{eqnarray}
+with $k$ a positive integer and $R$ a rational function.
+\textit{Modulo} homographic transformations (which leave (\ref{eqBB-Binomial}) form-invariant),
+only four of them are elliptic,
+and their general solution is a homographic transform of, respectively,
+$\wp$, $\wp'$, $\wp^2$, $\wp^3$,
+where $\wp$ denotes the elliptic function of Weierstrass.
+
+% ============================================================================
+% ============================================================================
+%\section{Transcendental meromorphic solutions}
+
+{}From another point of view,
+namely the growth at infinity of meromorphic solutions of ODEs,
+another class of ODEs also form-invariant under homographic transformations
+has been thoroughly studied,
+this class is made of the autonomous Schwarzian differential equations
+\begin{eqnarray}
+& &
+\left\lbrace u;z \right\rbrace^p=R(u),
+%\left(S(u,z)\right)^p=R(u),
+%S(u,z)=
+\left\lbrace u;z \right\rbrace=\frac{u'''}{u'}-\frac{3}{2} \left(\frac{u''}{u'}\right)^2,
+\label{eqOrder3-degree1-Schwarzian-autonomous}
+\end{eqnarray}
+with $p$ a positive integer and $R$ a rational function.
+
+Ishizaki \cite{Ishizaki-1991} enumerated all ODEs (\ref{eqOrder3-degree1-Schwarzian-autonomous})
+possessing particular transcendental meromorphic solutions.
+\textit{Modulo} homographies, there are only six of them,
+whose canonical form with an equal number
+(counting multiplicity) of poles and zeroes in $R$ is,
+\begin{eqnarray}
+& &
+\left\lbrace
+\begin{array}{ll}
+\displaystyle{
+\left\lbrace u;z \right\rbrace  =c
+\frac{(u-\sigma_1)  (u-\sigma_2)(u-\sigma_3)(u-\sigma_4)}{(u-\tau_1)  (u-\tau_2)(u-\tau_3)(u-\tau_4)}\ccomma  % wp
+}\\ \displaystyle{
+\left\lbrace u;z \right\rbrace^3=c
+\frac{(u-\sigma_1)^3(u-\sigma_2)^3}                      {(u-\tau_1)^2(u-\tau_2)^2(u-\tau_3)^2}\ccomma       % wp'
+}\\ \displaystyle{
+\left\lbrace u;z \right\rbrace^2=c
+\frac{(u-\sigma_1)^2(u-\sigma_2)^2}                      {(u-\tau_1)^2(u-\tau_2)(u-\tau_3)}\ccomma          % wp^2
+}\\ \displaystyle{
+\left\lbrace u;z \right\rbrace^3=c
+\frac{(u-\sigma_1)^3(u-\sigma_2)^3}                      {(u-\tau_1)^3(u-\tau_2)^2(u-\tau_3)}\ccomma        % wp^3
+}\\ \displaystyle{
+\left\lbrace u;z \right\rbrace  =c
+\frac{(u-\sigma_1)  (u-\sigma_2)}                        {(u-\tau_1)  (u-\tau_2)}\ccomma                %?sin(z)p10
+}\\ \displaystyle{
+\left\lbrace u;z \right\rbrace  =c,                                                                                                     %?e^z
+}
+\end{array}
+\right.
+\label{eqList6}
+\end{eqnarray}
+where $c$, $\tau_j$, $\sigma_j$, $j=1,\dots,4$ are complex constants,
+the $\tau_j$'s being distinct and
+the $\sigma_j$'s depending on the $\tau_j$'s.
+
+\begin{comment}
+\begin{eqnarray}
+   S(u,z)  &=&c\frac{(u-\sigma_1)  (u-\sigma_2)(u-\sigma_3)(u-\sigma_4)}{(u-\tau_1)  (u-\tau_2)(u-\tau_3)(u-\tau_4)} \label{ss-eq1} % wp
+\\ S(u,z)^3&=&c\frac{(u-\sigma_1)^3(u-\sigma_2)^3}                      {(u-\tau_1)^2(u-\tau_2)^2(u-\tau_3)^2} \label{ss-eq3}       % wp'
+\\ S(u,z)^2&=&c\frac{(u-\sigma_1)^2(u-\sigma_2)^2}                      {(u-\tau_1)^2(u-\tau_2)(u-\tau_3)} \label{ss-eq4}           % wp^2
+\\ S(u,z)^3&=&c\frac{(u-\sigma_1)^3(u-\sigma_2)^3}                      {(u-\tau_1)^3(u-\tau_2)^2(u-\tau_3)} \label{ss-eq2}         % wp^3
+\\ S(u,z)  &=&c\frac{(u-\sigma_1)  (u-\sigma_2)}                        {(u-\tau_1)  (u-\tau_2)} \label{ss-eq5}                     % sin(a z)
+\\ S(u,z)  &=&c,                                                                                 \label{ss-eq6}                     % e^{a z}
+\end{eqnarray}
+\end{comment}
+
+Then two of us \cite{LiaoWu-Schwarzian-ODEs} found explicitly
+all the transcendental meromorphic solutions of Eqs.~(\ref{eqList6}),
+except those solutions of Eq.~(\ref{eqList6})$_{5}$ that have no Picard exceptional values.
+One of the key points in the derivation of these solutions is to show that each of them
+obeys a first order differential equation of the form \eqref{first-order ODE}
+by applying Nevanlinna theory \cite{LaineBook} on the value distribution of meromorphic functions
+and the Laurent expansions around poles.
+Nevertheless, for Eq.~(\ref{eqList6})$_{5}$, the argument in \cite{LiaoWu-Schwarzian-ODEs}
+only works when $u$ possesses at least one Picard exceptional value.
+Then transcendental meromorphic solutions of Eqs.~(\ref{eqList6}) can be obtained
+by solving the corresponding first order differential equations.
+
+We remark that all transcendental meromorphic solutions of Eqs.~(\ref{eqList6})  given in \cite{LiaoWu-Schwarzian-ODEs}  belong to class {\it $W$},
+which consists of elliptic functions and their degeneracies,
+i.e.~functions $R(z)$ or $R(e^{az}), a \in \C$, where $R$ is a rational function.
+As shown by Eremenko \cite{EremenkoKS}, functions in class {\it $W$}
+constitute all transcendental meromorphic solutions of a class of
+autonomous algebraic differential equations \cite{ConteNgWong-RSH,EremenkoKS,NgWu2019-Loewy}.
+It turns out that Ermenko's method can be further generalized to a wider class
+of differential equations \cite{CNW-boundary-layer,Demina-Two-top-degree}.
+
+For the last equation of (\ref{eqList6}), all the transcendental meromorphic solutions
+are the three-parameter homographic transforms of $e^{a z}$
+(or equivalently $\coth(a z/2)$), $c=-a^2/2$.
+
+For the first four equations in (\ref{eqList6}),
+all the transcendental meromorphic solutions are a one-parameter elliptic function.
+Since the solutions  $u(z)$ of Theorems 5 and 6 in Ref.~\cite{LiaoWu-Schwarzian-ODEs}
+obey the respective ODEs
+\begin{eqnarray}
+& & \hbox{(Thm 5) } \left(\frac{\D u}{\D z}\right)^3 = L^3 u^2 (u-1)^2 (u+1)^2,
+\\
+& & \hbox{(Thm 6) } \left(\frac{\D u}{\D z}\right)^4 = L^4 u^2 (u-1)^3 (u+1)^3,
+\end{eqnarray}
+they admit the general solutions
+\begin{eqnarray}
+& & \hbox{(Thm 5) } u(z)= - \frac{2 L^3}{27 \wp'(z-z_0)}\ccomma
+\\
+& & \hbox{(Thm 6) } u(z)= 1 + \frac{L^4}{32 (\wp^2(z-z_0) - L^4/64)}\ccomma
+\end{eqnarray}
+with $z_0$ arbitrary.
+
+Therefore all the transcendental meromorphic solutions of the first four equations in the list (\ref{eqList6})
+are the most general homographic transforms of, respectively,
+$\wp(z-z_0)$, $\wp'(z-z_0)$, $\wp^2(z-z_0)$, $\wp^3(z-z_0)$.
+This establishes a one-to-one correspondence with the above recalled result of Briot and Bouquet.
+
+Choosing the identity for the above mentioned homographic transformations,
+one deduces a second canonical form of equations (\ref{eqList6}),
+\begin{equation}
+\left\{ \begin{array}{lll}
+%Schwp:=(3/8)*(16*u0^4+8*u0^2*a+a^2+32*b*u0)/(-4*u0^3+a*u0+b);
+%  BBeq:=-diff(u(x),x)**2+4*u(x)**3-a*u(x)-b;
+\left\lbrace u;z \right\rbrace   & = \displaystyle{- \frac{3}{8} \frac{(4 u^2+g_2)^2 +32 g_3 u}{4 u^3-g_2 u -g_3}} & u=\wp(z,g_2,g_3) \\
+%"############# wp' ";
+%Schwpp:=-16*(u0^2-3*wg3)^3/(u0^2+wg3)^2;
+%  BBeq:=-diff(u(x),x)**3+27/2*(u(x)**2+wg3)**2;
+\left\lbrace u;z \right\rbrace^3 & =\displaystyle{-16 \frac{(u^2-3 g_3)^3}{(u^2+g_3)^2}}                           & u=\wp'(z,0,g_3) \\
+%"############# wp**2 ";
+%Schwp2:=(9/64)*(80*u0^2-24*u0*wg2+5*wg2^2)^2/(u0*(4*u0-wg2)^2);
+%  BBeq:=-diff(u(x),x)**4+256*(u(x)-wg2/4)**2*(u(x)-0)**3;# ERRATUM, The PH 2020
+\left\lbrace u;z \right\rbrace^2 & =\displaystyle{\frac{9 (80 u^2-24 g_2 u + 5 g_2^2)}{64 u (4 u - g_2)^2}}        & u=\wp^2(z,g_2,0) \\
+%"############# wp**3 ";
+%Schwp3:=-8*(2*wg3^2-10*u0*wg3+35*u0^2)^3/((-wg3+4*u0)^3*u0^2);
+%  BBeq:=-diff(u(x),x)**6+46656*(u(x)-wg3/4)**3*(u(x)-0)**4;
+\left\lbrace u;z \right\rbrace^3 & =\displaystyle{-8 \frac{(35 u^2 - 10 g_3 u + 2 g_3^2)^3}{u^2 (4 u - g_3)^3}} & u=\wp^3(z,0,g_3) \\
+%"############# a/sinh(a*z)";
+%Schisinh:=-(1/2)*a^2*(-2*u0^2+a^2)/(a^2+u0^2);
+%   BBeq:=-diff(u(x),x)**2+u(x)**4+a**2*u(x)**2;
+\left\lbrace u;z \right\rbrace & =\displaystyle{\frac{a^2 (2 u^2-a^2)}{u^2+a^2}} & u=\displaystyle{\frac{a}{\sinh(a z)}} \\
+%"############# sinh(a*z)";
+%Schsinh:=-(1/2)*a^2*(u0^2-2)/(u0^2+1);
+%   BBeq:=-diff(u(x),x)**2+a**2*(u(x)**2+1);
+%\left\lbrace u;z \right\rbrace & =\displaystyle{-\frac{a^2 (u^2-2)}{u^2+1}} & u=\sinh(a z) \\
+%"############# exp(a*z)";
+%Schexp:=-a**2/2;
+%  BBeq:=-diff(u(x),x)+a*u(x);
+\left\lbrace u;z \right\rbrace  &  =\displaystyle{-\frac{a^2}{2}} & u=\displaystyle{\frac{c_1 e^{a z}+c_2}{c_3 e^{a z}+c_4}}\cdot
+\end{array}\right.
+\label{eqList6bis}
+\end{equation}
+
+\textit{Remark}.
+The first five equations (\ref{eqList6bis}) have no other singlevalued solutions
+than the above mentioned one-parameter meromorphic functions.
+Indeed,
+each of them admits at least one Laurent series
+whose Fuchs indices \cite{CMBook} are $j=-1$ and two irrational numbers,
+respectively
+\begin{equation}
+%"wp   ",movable(Schwp ,1, 1,-2);# i^2-i-3
+%"wp'+ ",movable(Schwpp,3,-2,-3);# i^2-i-8 Schwpp is an even function of wp'
+%"wp'- ",movable(Schwpp,3, 2,-3);# i^2-i-8
+%"wp^2 ",movable(Schwp2,2, 1,-4);# i^2-i-15
+%"wp^3 ",movable(Schwp3,3, 1,-6);# i^2-i-35
+%
+\left\{ \begin{array}{lll}
+u  & =    z^{-2} + \dots & \hbox{indices } (j+1)(j^2-j-3)=0, \\ % \wp
+u  & = -2 z^{-3} + \dots & \hbox{indices } (j+1)(j^2-j-8)=0, \\ % \wp'
+u  & =    z^{-4} + \dots & \hbox{indices } (j+1)(j^2-j-15)=0, \\ % \wp^2
+u  & =    z^{-6} + \dots & \hbox{indices } (j+1)(j^2-j-35)=0, \\ % \wp^3
+\displaystyle{\frac{1}{u-i a}} & = \displaystyle{\frac{2 i}{a^3}} z^{-2} + \dots & \hbox{indices } (j+1)(j^2-j-3)=0, \\ % a/sinh(a z)
+\end{array}\right.
+\label{eqList5}
+\end{equation}
+thus lowering by two the maximal number (three) of arbitrary constants
+in any singlevalued solution.
+
+% ============================================================================
+% ============================================================================
+
+\vfill\eject
+
+% ***************************************************************** References
+
+
+\begin{thebibliography}{99}
+
+%{\color{red}
+
+\bibitem{BriotBouquet} Briot~C. and Bouquet~J.-C.,
+{\it Th\'eorie des fonctions elliptiques},
+1${}^{\rm re}$ \'edition  (Mallet-Bachelier, Paris, 1859);
+2i\`eme \'edition (Gauthier-Villars, Paris, 1875).
+%\verb+https://gallica.bnf.fr/ark:/12148/bpt6k99571w?rk=21459;2+ % BB 2i\`eme \'edition
+% Orsay math
+% p 388 équations binômes
+
+\bibitem{CMBook} Conte~R. and Musette~M.,
+{\it The Painlev\'e handbook}, 2nd ed.,
+%391 pages
+(Springer Nature, Switzerland, 2020).
+%https://doi.org/10.1007/978-3-030-53340-3
+
+%Free access to
+
+%\verb+https://link.springer.com/content/pdf/bfm\%3A978-3-030-53340-3\%2F1.pdf+ Contents %3A=: %2F=/
+
+%\verb+https://link.springer.com/content/pdf/bbm\%3A978-3-030-53340-3\%2F1.pdf+ Appendix
+
+\bibitem{ConteNgWong-RSH} Conte~R., Ng~T.W. and Wong~K.K.,
+Exact meromorphic solutions of the real cubic Swift-Hohenberg equation,
+%Studies in applied mathematics
+Stud. Appl. Math., 2012, V.129, 117--131.
+%http://dx.doi.org/10.1111/j.1467-9590.2012.00546.x
+%http://onlinelibrary.wiley.com/doi/10.1111/j.1467-9590.2012.00546.x/pdf
+%http://arXiv.org/abs/1202.3579 % (nlin.SI) (math.CA)
+
+\bibitem{CNW-boundary-layer} Conte~R., Ng~T.W. and Wu~C.F.,
+Closed-form meromorphic solutions of some third order
+boundary layer ordinary differential equations,
+%Bulletin des sciences math\'ematiques
+Bull. Sci. Math., 2022, V.174, 103096 (18 pp).
+%https://doi.org/10.1016/j.bulsci.2021.103096
+%http://arxiv.org/abs/2112.15267  math.CV math.CA
+
+\bibitem{Demina-Two-top-degree} Demina~M.V.,
+Classification of meromorphic integrals for autonomous nonlinear
+ordinary differential equations with two dominant monomials,
+%Journal of mathematical analysis and applications
+J. Math. Anal. Appl., 2019, V.479, 1851--1862.
+%https://doi.org/10.1016/j.jmaa.2019.07.026
+
+\bibitem{EremenkoKS} Eremenko~A.E.,
+Meromorphic traveling wave solutions of the Kuramoto-Sivashinsky equation,
+%J.~of mathematical physics, analysis and geometry
+Math. Phys. Anal. Geom., 2006, V.2, 278--286.
+%http://jmag.ilt.kharkov.ua/jmag/pdf/2/jm02-0278e.pdf
+%http://arxiv.org/abs/nlin.SI/0504053
+
+\bibitem{Hille} Hille~E.,
+\textit{Ordinary differential equations in the complex domain},
+(J.~Wiley and sons, New York, 1976).
+%Chinese translation by Yang Chungchun (publisher?, city?, year?)
+% doc Orme CJ010, Saclay M 2899
+
+\bibitem{Ishizaki-1991} Ishizaki~K., Admissible solutions of the Schwarzian differential equations,
+J.~Austral.~Math.~Soc.~Ser.~A, 1991, V.50, 258--278.
+%https://doi.org/10.1017/S1446788700032742
+
+\bibitem{LaineBook} Laine~I.,                                         % yes
+{\it Nevanlinna theory and complex differential equations}, (de Gruyter, Berlin and New York, 2011).
+%https://doi.org/10.1515/9783110863147
+%ISBN 9783110134223
+
+\bibitem{LiaoWu-Schwarzian-ODEs}% Liangwen Liao and Chengfa Wu,
+Liao~L.W. and Wu~C.F.,
+Exact meromorphic solutions of Schwarzian differential equations,
+%Mathematische Zeitschrift
+Math. Z., 2021, V.300, 1657-1672.
+%https://doi.org/10.1007/s00209-021-02855-y
+%https://arxiv.org/abs/2103.01393
+% {f;z}=R(f), f mero transcendental => R=(3)-(8) (Ishizaki 1991)
+
+\bibitem{LiaoYe-Schwarzian-ODEs}% Liangwen Liao and Zhuan Ye,
+Liao~L.W. and Ye~Z.,
+On the growth of meromorphic solutions of the Schwarzian differential equations,
+%Journal of mathematical analysis and applications
+J. Math. Anal. Appl., 2005,  V.309, 91--102.
+%https://doi.org/10.1016/j.jmaa.2004.12.011
+
+\bibitem{NgWu2019-Loewy} Ng~T.W. and Wu~C.F.,            % pdf
+Nonlinear Loewy factorizable algebraic ODEs and Hayman's conjecture,
+%{\it Israel Journal of Mathematics} {\bf 229}
+Isr. J. Math., 2019, V.229, 1--38.
+%https://doi.org/10.1007/s11856-018-1791-0
+%https://arxiv.org/abs/1710.08593
+
+
+%}
+\end{thebibliography}
+
+
+
+\end{document}\end
+
+\begin{thebibliography}{99}
+
+\bibitem{BriotBouquet} C.~Briot et J.-C.~Bouquet,
+{\it Th\'eorie des fonctions elliptiques},
+1${}^{\rm re}$ \'edition  (Mallet-Bachelier, Paris, 1859);
+2i\`eme \'edition (Gauthier-Villars, Paris, 1875).
+\verb+https://gallica.bnf.fr/ark:/12148/bpt6k99571w?rk=21459;2+ % BB 2i\`eme \'edition
+% Orsay math
+% p 388 équations binômes
+
+\bibitem{CMBook} R.~Conte and M.~Musette,
+{\it The Painlev\'e handbook}, 2nd ed.,
+391 pages (Springer Nature, Switzerland, 2020).
+https://doi.org/10.1007/978-3-030-53340-3
+
+%Free access to
+
+%\verb+https://link.springer.com/content/pdf/bfm\%3A978-3-030-53340-3\%2F1.pdf+ Contents %3A=: %2F=/
+
+%\verb+https://link.springer.com/content/pdf/bbm\%3A978-3-030-53340-3\%2F1.pdf+ Appendix
+
+\bibitem{ConteNgWong-RSH} R.~Conte, T.-W.~Ng and Kwok-Kin Wong,
+Exact meromorphic solutions of the real cubic Swift-Hohenberg equation,
+Studies in applied mathematics {\bf 129} (2012) 117--131.
+http://dx.doi.org/10.1111/j.1467-9590.2012.00546.x
+%http://onlinelibrary.wiley.com/doi/10.1111/j.1467-9590.2012.00546.x/pdf
+http://arXiv.org/abs/1202.3579 % (nlin.SI) (math.CA)
+
+\bibitem{CNW-boundary-layer} R.~Conte, Tuen Wai Ng and Cheng-Fa Wu,
+Closed-form meromorphic solutions of some third order
+boundary layer ordinary differential equations,
+Bulletin des sciences math\'ematiques {\bf 174} (2022) 103096 (18 pp).
+https://doi.org/10.1016/j.bulsci.2021.103096
+http://arxiv.org/abs/2112.15267  math.CV math.CA
+
+\bibitem{Demina-Two-top-degree} M.V.~Demina,
+Classification of meromorphic integrals for autonomous nonlinear
+ordinary differential equations with two dominant monomials,
+Journal of mathematical analysis and applications {\bf 479} (2019) 1851--1862.
+https://doi.org/10.1016/j.jmaa.2019.07.026
+
+\bibitem{EremenkoKS} A.E.~Eremenko,
+Meromorphic traveling wave solutions of the Kuramoto-Sivashinsky equation,
+J.~of mathematical physics, analysis and geometry {\bf 2 (3)} (2006) 278--286.
+http://jmag.ilt.kharkov.ua/jmag/pdf/2/jm02-0278e.pdf
+http://arxiv.org/abs/nlin.SI/0504053
+
+\bibitem{Hille} E.~Hille,
+\textit{Ordinary differential equations in the complex domain}
+(J.~Wiley and sons, New York, 1976).
+%Chinese translation by Yang Chungchun (publisher?, city?, year?)
+% doc Orme CJ010, Saclay M 2899
+
+\bibitem{Ishizaki-1991} K.~Ishizaki,
+Admissible solutions of the Schwarzian differential equations,
+J.~Austral.~Math.~Soc.~Ser.~A {\bf 50} (1991) 258--278.
+https://doi.org/10.1017/S1446788700032742
+
+\bibitem{LaineBook} I.~Laine,                                         % yes
+{\it Nevanlinna theory and complex differential equations}
+(de Gruyter, Berlin and New York, 2011).
+https://doi.org/10.1515/9783110863147
+ISBN 9783110134223
+
+\bibitem{LiaoWu-Schwarzian-ODEs} Liangwen Liao and Chengfa Wu,
+Exact meromorphic solutions of Schwarzian differential equations,
+Mathematische Zeitschrift (2021) (16pp).
+https://doi.org/10.1007/s00209-021-02855-y
+https://arxiv.org/abs/2103.01393
+% {f;z}=R(f), f mero transcendental => R=(3)-(8) (Ishizaki 1991)
+
+\bibitem{LiaoYe-Schwarzian-ODEs} Liangwen Liao and Zhuan Ye,
+On the growth of meromorphic solutions of the Schwarzian differential equations,
+Journal of mathematical analysis and applications {\bf 309} (2005) 91--102.
+https://doi.org/10.1016/j.jmaa.2004.12.011
+
+\bibitem{NgWu2019-Loewy} T.W.~Ng and C.F.~Wu,            % pdf
+Nonlinear Loewy factorizable algebraic ODEs and Hayman's conjecture,
+{\it Israel Journal of Mathematics} {\bf 229} (2019) 1--38.
+https://doi.org/10.1007/s11856-018-1791-0
+https://arxiv.org/abs/1710.08593
+
+\end{thebibliography}
+
+\vfill\eject
+
+\end{document}\end
+
+% ============================================================================
+% ============================================================================
+\section{Definitions}
+
+$R$ denotes a rational function of its arguments.
+
+PP of an ODE := its general solution has no movable critical singularities
+(synonym = has only fixed critical singularities).
+
+Meromorphic := the only singularities at a finite distance are poles.
+
+Caveat: PP always deals with the \textit{general} solution,
+Nevanlinna most often considers only \textit{particular} solutions.
+
+% ============================================================================
+% ============================================================================
+\section{First order, autonomous, binomial ODEs (Briot and Bouquet)}
+
+Class of ODEs
+\begin{eqnarray}
+& &
+\left(\frac{\D u}{\D x}\right)^n = R(u), n \in \mathbb{N}.
+\label{eqBinomial}
+\end{eqnarray}
+Remark: any nonconstant particular solution of (\ref{eqBinomial}) is the general solution.
+
+\textbf{Theorem} (Briot and Bouquet  \cite[\S 247--248]{BriotBouquet})
+Class (\ref{eqBinomial}) and meromorphic $\Longrightarrow$
+\textit{modulo} an homography on $u$, $9$ allowed values of $(n,R)$,
+characterized by the diophantine equation
+\begin{eqnarray}
+& &
+\forall j:\ r_j=1-\frac{1}{n_j},
+\sum r_j=2, n_j \in \mathbb{Z} \hbox{ (possibly infinite)},
+\\ & &
+\frac{\D u}{\D x} = \prod_{j=1}^4 (u-a_j)^{r_j}.
+\label{eqBB-Diophante}
+\end{eqnarray}
+See Table A.1 in The PH 2020 page 282, reproduced here.
+
+The converse is true: any ODE in this finite list has a meromorphic general solution,
+more precisely elliptic or degenerate.
+
+\tabcolsep=1.5truemm
+\tabcolsep=0.5truemm
+
+\begin{table}[ht] % [p]
+\caption[All first order binomial equations.]{
+All first order binomial equations,
+ordered by the type of their solution (rational, trigonometric, elliptic).
+% spx/BriotBouquet.mw  spx/BriotBouquet.amp
+% Notation = BB = by increasing powers
+Columns are: $n \ge 2$, monic polynomial $P$, solution
+($x_0$ is omitted).
+$a,b,c,d$ are complex constants
+and $(A,B,C,g_2,g_3,k)$ algebraic expressions of $(a,b,c,d)$.
+When the degree of $P$ in (\ref{eqBinomial}) is maximal (i.e.~$2 n$),
+anyone of the factors of $P$ can be set to $1$ by a homography.
+An equivalent table (however without the solutions) can be found
+in Garnier \cite[p 127 Table (T)]{Garnier1960}.
+}
+\vspace{0.2truecm}
+\begin{center}
+\begin{tabular}{| l | l | l |}
+\hline
+$n$ & $P$ & solution\\ \hline
+%
+$2$ & $u$                    & $u=x^2/4$ \\ \hline
+$2$ & $(u-a)^3$              & $u=a+4/x^2$ \\ \hline
+$n$ & $(u-a)^{n+1}(u-b)^{n-1}$& $(u-b)/(u-a) = ((b-a)x/n)^n$ \\ \hline \hline
+%
+$2$ & $(u-a)(u-b)$           & $u=(a+b)/2\pm((a-b)/2) \cosh x$\\ \hline
+$2$ & $(u-a)^2(u-b)$         & $u=b+4 k^2\coth^2 (k x), k^2=(a-b)/4$ \\ \hline
+$2$ & $(u-a)^2(u-b)(u-c)$    & $1/(u-a)=A \cosh(B x) + C$ \\ \hline \hline
+%
+$2$ & $(u-a)(u-b)(u-c)(u-d)$ & $A\wp(x,g_2,g_3)=3/(u-a)-1/(b-a)-1/(c-a)-1/(d-a)$ \\ \hline
+$2$ & $(u-a)(u-b)(u-c)$      & $A\wp(x,g_2,g_3)=u-(a+b+c)/3                           $ \\ \hline
+%
+$3$ & $(u-a)^2(u-b)^2(u-c)^2$& $A\wp'(x,0,g_3)=1/(u-a)-(1/2)(1/(b-a)+1/(c-a))$ \\ \hline
+$3$ & $(u-a)^2(u-b)^2       $& $A\wp'(x,0,g_3)=u-(a+b)/2                     $ \\ \hline
+%
+$4$ & $(u-a)^2(u-b)^3(u-c)^3$& $A\wp^2(x,g_2,0)=1/(u-b)-1/(c-b)$ \\ \hline
+$4$ & $(u-a)^2(u-b)^3       $& $A\wp^2(x,g_2,0)=u-a            $ \\ \hline
+$4$ & $       (u-b)^3(u-c)^3$& $A\wp^2(x,g_2,0)=(u-b)/(u-c)    $ \\ \hline
+%
+$6$ & $(u-a)^3(u-b)^4(u-c)^5$& $A\wp^3(x,0,g_3)=1/(u-c)-1/(b-c)$ \\ \hline
+$6$ & $(u-a)^3(u-b)^4       $& $A\wp^3(x,0,g_3)=u-b            $ \\ \hline
+$6$ & $(u-a)^3       (u-c)^5$& $A\wp^3(x,0,g_3)=1/(u-c)        $ \\ \hline
+$6$ & $       (u-b)^4(u-c)^5$& $A\wp^3(x,0,g_3)=1/(u-c)-1/(b-c)$ \\ \hline
+\end{tabular}
+\end{center}
+\label{TableBB}
+\end{table}
+
+% ============================================================================
+% ============================================================================
+\section{Second order, first degree}
+
+Class of ODEs
+\begin{eqnarray}
+& &
+\frac{\D^2 u}{\D x^2} = F\left(\frac{\D u}{\D x},u;x \right),
+\label{eqOrder2-degree1}
+\end{eqnarray}
+$F$ rational in $\D u / \D x$, algebraic in $u$, analytic in $x$.
+
+\textbf{Theorem} (Painlev\'e 1900, 1902)
+Class (\ref{eqOrder2-degree1}) and PP $\Longrightarrow$
+\begin{enumerate}
+\item
+As a function of $\D u / \D x$, $F$ is a polynomial of degree at most two,
+\begin{eqnarray}
+& &
+\frac{\D^2 u}{\D x^2} = L(u,x) \left(\frac{\D u}{\D x}\right)^2 + M(u,x) \frac{\D u}{\D x} + N(u,x).
+\label{eqOrder2-degree1-Riccati}
+\end{eqnarray}
+\item
+As a function of $u$, $L$ is a sum of at most 4 simple poles,
+\begin{eqnarray}
+& & % prod_{j=1}^4 (u-a_j)^{r_j}.
+L(u,x) = \sum_{j=1}^4 \frac{r_j}{u-a_j(x)},
+\end{eqnarray}
+with the same constraints (\ref{eqBB-Diophante}) than in the BB list.
+See Painlev\'e 1900  Tableau (T) section 10 page 216.
+
+\item
+The only singularities $u$ of the functions $M(u,x)$ and $N(u,x)$ are among those of $L(u,x)$.
+
+\item
+All the degrees of all the involved rational functions are bounded,
+which makes the problem finite.
+
+\end{enumerate}
+
+
+\textbf{Conjecture} (Nevanlinna people, see e.g.~Liao and Ye 2005 page 283)
+(Subset of class (\ref{eqOrder2-degree1}) with $F$ rational in its three arguments)
+and (existence of a particular nonrational meromorphic solution)
+$\Longrightarrow$ (\ref{eqOrder2-degree1-Riccati})
+with $L,M,N$ rational functions of $u$ and $x$.
+
+\textit{Remark}.
+There is a huge gap between P 1900 and this conjecture.
+
+
+
+\textbf{Theorem} (Liao and Ye 2005 page 283)
+(Subset of class (\ref{eqOrder2-degree1-Riccati}) with $L,M,N$ independent of $x$ and rational in $u$)
+and
+(existence of a particular nonrational meromorphic solution of Nevanlinna order higher than two)
+$\Longrightarrow$
+exactly the finite list of Painlev\'e 1902.
+
+
+\textit{Remark}.
+Error in (17), $A$ cannot be arbitrary, as displayed in Liao and Ye page 300 line 2.
+
+
+\textit{Remark}.
+The proof that all cases (10)--(18) do exist is already in P 1902 + Gambier 1910.
+
+
+% ============================================================================
+% ============================================================================
+\section{Third order, first degree}
+
+Class of ODEs
+\begin{eqnarray}
+& &
+\frac{\D^3 u}{\D x^3} = F\left(\frac{\D^2 u}{\D x^2},\frac{\D u}{\D x},u;x \right),
+\label{eqOrder3-degree1}
+\end{eqnarray}
+$F$ rational in $\D^2 u / \D x^2$ and $\D u / \D x$, algebraic in $u$, analytic in $x$.
+
+
+\textbf{Theorem} (Painlev\'e 1900 section 34 page 252.)
+Class (\ref{eqOrder3-degree1}) and PP $\Longrightarrow$
+\begin{enumerate}
+\item
+As a function of $\D^2 u / \D x^2$, $F$ is a polynomial of degree at most two,
+\begin{eqnarray}
+& &
+\frac{\D^3 u}{\D x^3} = L\left(\frac{\D u}{\D x},u,x\right) \left(\frac{\D^2 u}{\D x^2}\right)^2
+                       +M\left(\frac{\D u}{\D x},u,x\right)       \frac{\D^2 u}{\D x^2}
+											+ N\left(\frac{\D u}{\D x},u,x\right).
+\label{eqOrder3-degree1-Riccati}
+\end{eqnarray}
+\item
+As a function of $\D u / \D x$, $L$ is a sum of at most 4 simple poles
+as listed in P 1900 page 253.
+
+\item
+The only singularities $u$ of the functions $M(u,x)$ and $N(u,x)$ are among those of $L(u,x)$.
+
+\item
+(P 1900 p 257)
+``For $n=-2$ and $b=0$ (Schwarzian case) the singlevalued functions $y(x)$ defined
+by the system (53) constitute the class of automorphic functions
+(Fuchsian and Kleinean)''.
+
+``The resolution of the prelimlinary problem which I just mentioned
+presents rather serious difficulties.''
+
+\item
+($n=-2$, Chazy 1911, about these difficulties)
+Page 330 the whole section 4 is devoted to the Schwarzian case.
+``The value $n=-2$ [Schwarzian case] is quite exceptional.'',
+with a quite interesting footnote.
+
+Page 331 middle [$h$ denotes the number of poles of his auxiliary function $b(y)$]
+``For $h \ge 4$ ($h$ is not bounded), except \dots,
+the singlevalued functions are Fuchsian or Kleinean functions. \dots''
+
+\item
+$n=-2$, limitation of all degrees (much more difficult, only finally settled by Chazy 1918)
+All the degrees of all the involved rational functions are bounded,
+which makes the problem finite.
+
+\end{enumerate}
+
+
+% ============================================================================
+% ============================================================================
+\section{Third order, first degree, Schwarzian case}
+
+This corresponds to $n=-2$ in P 1900 page 253.
+
+
+Class of ODEs
+\begin{eqnarray}
+& &
+\frac{\D^3 u}{\D x^3} = \frac{3}{2}
+\frac{\left(\frac{\D^2 u}{\D x^2}\right)^2}{\frac{\D u}{\D x} + a_2(x) u^2 + a_1(x) u + a_0(x)}
+ +M\left(\frac{\D u}{\D x},u,x\right)       \frac{\D^2 u}{\D x^2}
+											+ N\left(\frac{\D u}{\D x},u,x\right).
+\label{eqOrder3-degree1-Schwarzian}
+\end{eqnarray}
+
+Definition
+$S(u,x):=\left\lbrace u;x\right\rbrace$ (Schwarzian).
+
+Restricted class of autonomous ODEs considered by Ishizaki
+\begin{eqnarray}
+& &
+\left(S(u,x)\right)^n=R(u).
+\label{eqOrder3-degree1-Schwarzian-autonomous}
+\end{eqnarray}
+
+Theorem (Ishizaki 1991).
+
+(Class (\ref{eqOrder3-degree1-Schwarzian-autonomous}))
+and
+(existence of a particular meromorphic solution)
+
+$\Longrightarrow$
+
+(a finite list of $R(f)$ in one-to-one correspondence with the list
+of Briot and Bouquet),
+listed \textit{modulo} homographies
+in two sublists in Liao and Wu arXiv:2103.01393v1:
+(i) list (3)-(8) if $u$ is nonrational,
+(ii) list of Remark 1 if $u$ is rational.
+
+Now, my main point.
+The elliptic solutions listed in Liao and Wu arXiv:2103.01393v1
+\textit{must} be in one-to-one correspondence with the elliptic solutions
+of BB recalled in Table \ref{TableBB}.
+
+This implies, \textit{modulo} homographies:
+\begin{enumerate}
+\item
+The $u(z)$ in Theorem 5 is $\wp'(z)$.
+
+\item
+The $u(z)$ in Theorem 6 is $\wp^2(z)$.
+
+\end{enumerate}
+
+
+\end{document}\end
+
+% ============================================================================
+\section{=== POUBELLE}
+
+
+\bibitem{?ChazyThese} J.~Chazy,
+Sur les \'equations diff\'erentielles du troisi\`eme ordre et d'ordre
+sup\'erieur dont l'int\'egrale g\'en\'erale a ses points critiques fixes,
+Th\`ese, Paris (1910);
+Acta Math.~{\bf 34} (1911) 317--385.
+https://doi.org/10.1007/BF02393211
+%Table des mati\`eres comment\'ee avec index, R.~Conte (1991), 6 pages.
+
+\bibitem{Chazy1912c} J.~Chazy,                                           %yes
+Sur la limitation du degr\'e des co\"efficients des \'equations
+diff\'erentielles alg\'ebriques \`a points critiques fixes,
+\CRAS\ {\bf 155} (1912) 132--135. % S\'eance du 8 juillet 1912.
+% Th\'eor\`eme manquant dans Painlev\'e, utile \`a partir de l'ordre trois.
+
+\bibitem{?Chazy1918} J.~Chazy,                                            %yes
+Sur la limitation du degr\'e des co\"efficients des \'equations
+diff\'erentielles alg\'ebriques \`a points critiques fixes,
+Acta Math.~{\bf 41} (1918) 29--69.
+% poly({y^(k),k<=n};x)=0 => limitation des degr\'es, sauf cas fuchsien (p 67)
+% Fausse référence dans (Painlevé vol.~III p.~17): {\bf 41} (1926) 1--69.
+
+\bibitem{?GambierThese} B.~Gambier,                                 % pdf
+Sur les \'equations diff\'erentielles du second ordre et du premier degr\'e
+dont l'int\'egrale g\'en\'erale est \`a points critiques fixes,
+%Th\`ese, Paris (1909);
+%Th\`ese, Upsal, 1909  (note page 58, Garnier 1912)
+Acta Math.~{\bf 33} (1910) 1--55.
+% Page 33 \PII(alpha=0) et \PII(alpha=\pm 1/2) sont algébriquement équivalentes
+
+\bibitem{?Garnier1960} R.~Garnier,                                 % pdf
+Sur des syst\`emes diff\'erentiels du second ordre dont l'int\'egrale
+g\'en\'erale est uniforme,
+\AnnENS {\bf 77} (1960) 123--144.
+\verb+http://archive.numdam.org/article/ASENS_1960_3_77_2_123_0.pdf+
+% Classification de $(dy/dx, dz/dx)=$fraction homog\`ene de $(y,z)$
+
+
+\bibitem{?PaiLecons} P.~Painlev\'e,                                     % yes
+{\it Le\c{c}ons sur la th\'eorie analytique des \'equations diff\'erentielles}
+(Le\c{c}ons de Stockholm, 1895)
+(Hermann, Paris, 1897).
+R\'eimpression, {\it O$\!$euvres de Paul Painlev\'e}, vol.~I
+(\'Editions du CNRS, Paris, 1973). % Ajouter les auteurs. Sec, Martinet, ?
+ \verb+http://hdl.handle.net/1908/1536+ % Univ Lille I % permanent link
+ \verb+http://iris.univ-lille1.fr/bitstream/handle/1908/1536/Q12790.pdf?sequence=3+
+
+\bibitem{?PaiBSMF} P.~Painlev\'e,
+M\'emoire sur les \'equations diff\'erentielles dont l'int\'egrale
+g\'e\-n\'e\-ra\-le est uniforme,
+Bull.~Soc.~Math.~France {\bf 28} (1900) 201--261.
+\verb+http://archive.numdam.org/article/BSMF_1900__28__201_0.pdf+
+% Double m\'ethode, seule table=p 216 (résidus).
+% P 216 Table complète des valeurs de coeff(y'^2)
+
+\bibitem{?PaiActa}                                               % pdf
+P.~Painlev\'e,
+Sur les \'equations diff\'erentielles du second ordre et d'ordre
+sup\'erieur dont l'int\'egrale g\'en\'erale est uniforme,
+Acta Math.~{\bf 25} (1902) 1--85.
+\verb+https://projecteuclid.org/download/pdf_1/euclid.acta/1485882109+
+% ***************************************************************** References
+\begin{thebibliography}{99}
+
+\end{thebibliography}
+
+
+\begin{verbatim}
+
+\end{verbatim}
+
+\begin{verbatim}
+
+\end{verbatim}
+
+
+\begin{verbatim}
+
+\end{verbatim}
+
+
+\begin{verbatim}
+
+\end{verbatim}
+
+
+\end{document}\end
+
+\eject
+
+
+\begin{eqnarray}
+& &
+\left\lbrace
+\begin{array}{ll}
+\displaystyle{
+%Schwp:=(3/8)*(16*u0^4+8*u0^2*a+a^2+32*b*u0)/(-4*u0^3+a*u0+b);
+%  BBeq:=-diff(u(x),x)**2+4*u(x)**3-a*u(x)-b;
+\left\lbrace u;z \right\rbrace  = - \frac{3}{8} \frac{(4 u^2+g_2)^2 +32 g_3 u}{4 u^3-g_2 u -g_3}\ccomma u=\wp(z,g_2,g_3),
+}\\ \displaystyle{
+%"############# wp' ";
+%Schwpp:=-16*(u0^2-3*wg3)^3/(u0^2+wg3)^2;
+%  BBeq:=-diff(u(x),x)**3+27/2*(u(x)**2+wg3)**2;
+\left\lbrace u;z \right\rbrace^3=-16 \frac{(u^2-3 g_3)^3}{(u^2+g_3)^2}\ccomma u=\wp'(z,0,g_3),
+}\\ \displaystyle{
+%"############# wp**2 ";
+%Schwp2:=(9/64)*(80*u0^2-24*u0*wg2+5*wg2^2)^2/(u0*(4*u0-wg2)^2);
+%  BBeq:=-diff(u(x),x)**4+256*(u(x)-wg2/4)**2*(u(x)-0)**3;# ERRATUM, The PH 2020
+\left\lbrace u;z \right\rbrace^2=\frac{9 (80 u^2-24 g_2 u + 5 g_2^2)}{64 u (4 u - g_2)^2}\ccomma u=\wp^2(z,g_2,0),
+}\\ \displaystyle{
+%"############# wp**3 ";
+%Schwp3:=-8*(2*wg3^2-10*u0*wg3+35*u0^2)^3/((-wg3+4*u0)^3*u0^2);
+%  BBeq:=-diff(u(x),x)**6+46656*(u(x)-wg3/4)**3*(u(x)-0)**4;
+\left\lbrace u;z \right\rbrace^3=-8 \frac{(35 u^2 - 10 g_3 u + 2 g_3^2)^3}{u^2 (4 u - g_3)^3}\ccomma u=\wp^3(z,0,g_3)
+}\\ \displaystyle{
+%"############# sinh(a*z)";
+%Schsinh:=-(1/2)*a^2*(u0^2-2)/(u0^2+1);
+%   BBeq:=-diff(u(x),x)**2+a**2*(u(x)**2+1);
+\left\lbrace u;z \right\rbrace  =-\frac{a^2 (u^2-2)}{u^2+1}\ccomma u=\sinh(a z),
+}\\ \displaystyle{
+%"############# exp(a*z)";
+%Schexp:=-a**2/2;
+%  BBeq:=-diff(u(x),x)+a*u(x);
+\left\lbrace u;z \right\rbrace  =-\frac{a^2}{2}  \ccomma u=e^{a z}.
+}
+\end{array}
+\right.
+\label{eqList6bis}
+\end{eqnarray}
+
+\begin{equation}
+f(z) = \left\{ \begin{array}{rcl}
+\overline{\overline{z^2}+\cos z} & \mbox{for}
+& |z|<3 \\ 0 & \mbox{for} & 3\leq|z|\leq5 \\
+\sin\overline{z} & \mbox{for} & |z|>5
+\end{array}\right.
+\end{equation}
+
+
+
+\begin{equation}
+\left\{ \begin{array}{rcl}
+a & b & c \\
+0 & x & y \\
+z & t & u
+\end{array}\right.
+\end{equation}
+
+
+\begin{eqnarray}
+& &
+\left\lbrace
+\begin{array}{ll}
+\displaystyle{
+}\\ \displaystyle{
+}\\ \displaystyle{
+}
+\end{array}
+\right.
+%\label{}
+\end{eqnarray}
+
+\begin{enumerate}
+\item
+
+\item
+
+\item
+\end{enumerate}

@@ -1,0 +1,268 @@
+% This must be in the first 5 lines to tell arXiv to use pdfLaTeX, which is strongly recommended.
+\pdfoutput=1
+% In particular, the hyperref package requires pdfLaTeX in order to break URLs across lines.
+
+\documentclass[11pt]{article}
+
+% Change "review" to "final" to generate the final (sometimes called camera-ready) version.
+% Change to "preprint" to generate a non-anonymous version with page numbers.
+\usepackage{acl}
+
+% Standard package includes
+\usepackage{times}
+\usepackage{latexsym}
+% \usepackage[pagebackref,breaklinks,colorlinks,citecolor=cvprblue]{hyperref}
+\usepackage{multirow}
+\usepackage{booktabs}
+% For proper rendering and hyphenation of words containing Latin characters (including in bib files)
+\usepackage[T1]{fontenc}
+% For Vietnamese characters
+% \usepackage[T5]{fontenc}
+% See https://www.latex-project.org/help/documentation/encguide.pdf for other character sets
+
+% This assumes your files are encoded as UTF8
+\usepackage[utf8]{inputenc}
+
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{amsmath}
+\usepackage{cleveref}
+\usepackage{tcolorbox}
+
+\usepackage{amssymb}
+\usepackage{xcolor}
+\usepackage{pifont}
+\definecolor{my_green}{RGB}{51,102,0}
+\definecolor{my_red}{RGB}{204, 0, 0}
+\newcommand{\cmark}{\textcolor{my_green}{\ding{51}}} % ✔
+\newcommand{\xmark}{\textcolor{my_red}{\ding{55}}} % ✘
+\newcommand{\lilei}[1]{\textcolor{violet}{\bf \small [#1 --lilei]}}
+\newcommand{\lpk}[1]{\textcolor{blue}{\bf \small [#1 --lpk]}}
+
+% This is also not strictly necessary, and may be commented out.
+% However, it will improve the aesthetics of text in
+% the typewriter font.
+\usepackage{inconsolata}
+
+% If the title and author information does not fit in the area allocated, uncomment the following
+%
+%\setlength\titlebox{<dim>}
+%
+% and set <dim> to something 5cm or larger.
+
+\title{Multimodal ArXiv: A Dataset for Improving Scientific Comprehension of Large Vision-Language Models}
+
+% Author information can be set in various styles:
+% For several authors from the same institution:
+% \author{Author 1 \and ... \and Author n \\
+%         Address line \\ ... \\ Address line}
+% if the names do not fit well on one line use
+%         Author 1 \\ {\bf Author 2} \\ ... \\ {\bf Author n} \\
+% For authors from different institutions:
+% \author{Author 1 \\ Address line \\  ... \\ Address line
+%         \And  ... \And
+%         Author n \\ Address line \\ ... \\ Address line}
+% To start a separate ``row'' of authors use \AND, as in
+% \author{Author 1 \\ Address line \\  ... \\ Address line
+%         \AND
+%         Author 2 \\ Address line \\ ... \\ Address line \And
+%         Author 3 \\ Address line \\ ... \\ Address line}
+
+\author{
+Lei Li\thanks{Equal Contribution.}$^\dagger$,  Yuqi Wang$^*$$^\dagger$, Runxin Xu$^\ddag$, Peiyi Wang$^\ddag$\\\textbf{Xiachong Feng$^\dagger$, Lingpeng Kong$^\dagger$, Qi Liu$^\dagger$}\\ 
+$^\dagger$The University of Hong Kong \\
+$^\dagger$Peking University\\
+ \texttt{\{nlp.lilei, runxinxu, wangpeiyi9979, xiachongfeng1996\}@gmail.com} \\ 
+ \texttt{wangyuqi@connect.hku.hk} \quad \texttt{\{lpk, liuqi\}@cs.hku.hk}\\
+  }
+\def\DatasetName{ArXivCap\ }
+
+\begin{document}
+\maketitle
+\input{00_abstract}
+
+
+
+\input{01_intro}
+
+\input{02_related}
+\input{dataset}
+
+\input{04_experiment}
+
+\input{10_conclusion}
+
+% Bibliography entries for the entire Anthology, followed by custom entries
+%\bibliography{anthology,custom}
+% Custom bibliography entries only
+\bibliography{11_references}
+\appendix
+
+\section{Details of Multimodal ArXiv}
+\label{apx:arxiv_cap}
+
+
+\subsection{Caption Cleaning}
+\label{apx:caption_clean}
+
+We apply a Python tool to clean the original caption and Table~\ref{tab:pylatexenc_clean} illustrates the caption before and after cleaning. 
+\input{tables/pylatexenc_clean}
+
+\subsection{Caption Word Cloud}
+\label{apx:caption_word_cloud}
+
+We visualize the word cloud of captions in our ArXivCap dataset in Figure~\ref{fig:word_cloud}, it can be seen that the captions have a diverse vocabulary for describing the different figures in the academic papers.
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=\linewidth]{figs/word_cloud.jpg}
+    \caption{Word cloud visualization of captions in our ArXivCap dataset.}
+    \label{fig:word_cloud}
+\end{figure}
+
+
+\subsection{Illustration Cases from ArXivCap and ArXivQA}
+\label{apx:case_illustrations}
+We provide illustrated cases from our dataset for a better understanding.
+Figure~\ref{fig:single_figure_pair} demonstrates a typical single figure-caption pair, and Figure~\ref{fig:multi_figure_case} shows the multiple figure-caption case.
+Figure~\ref{fig:qa_case_1}, \ref{fig:qa_case_2}, \ref{fig:qa_case_3} and \ref{fig:qa_case_4} illustrate the cases from our ArXivQA dataset, covering different figure types and containing diverse questions.
+
+
+
+\begin{figure}[htb!]
+    \centering
+    \includegraphics[width=\linewidth]{figs/single-figure.pdf}
+    \caption{A single-figure caption pair in our ArXivCap dataset.}
+\label{fig:single_figure_pair}
+\end{figure}
+
+
+\begin{figure*}[t!]
+    \centering
+    \includegraphics[width=\linewidth]{figs/multiple-figure.pdf}
+    \caption{A multiple-figure caption pair in our ArXivCap dataset.}
+    \label{fig:multi_figure_case}
+\end{figure*}
+
+
+\begin{figure*}[tbh!]
+    \centering
+    \includegraphics[width=\linewidth]{figs/arxivqa_case1.pdf}
+    \caption{A case from ArXivQA.}
+    \label{fig:qa_case_1}
+\end{figure*}
+
+
+
+\begin{figure*}[tbh!]
+    \centering
+    \includegraphics[width=\linewidth]{figs/arxivqa_case2.pdf}
+    \caption{A case from ArXivQA.}
+    \label{fig:qa_case_2}
+\end{figure*}
+
+
+
+\begin{figure*}[tbh!]
+    \centering
+    \includegraphics[width=\linewidth]{figs/arxivqa_case3.pdf}
+    \caption{A case from ArXivQA.}
+    \label{fig:qa_case_3}
+\end{figure*}
+
+
+
+\begin{figure*}[tbh!]
+    \centering
+    \includegraphics[width=\linewidth]{figs/arxivqa_case4.pdf}
+    \caption{A case from ArXivQA.}
+    \label{fig:qa_case_4}
+\end{figure*}
+\input{tables/domain-full-name}
+
+
+\input{tables/arxivqa_template}
+\subsection{ArXivQA Prompting Template}
+\label{apx:prompt_template}
+The prompt used to query GPT-4V is provided in Table~\ref{tab:prompt_for_ArXivqa}.
+
+\section{Evaluation Details}
+\label{apx:evaluation_details}
+\subsection{Details of Evaluated Models}
+
+
+\noindent\textbf{BLIP2}~\citep{li2023blip2}, 
+introduces a lightweight Q-Former designed to bridge modality gaps and leverages frozen LLMs. Leveraging LLMs, BLIP-2 can conduct zero-shot image-to-text generation using natural language prompts. We select the \texttt{BLIP2-OPT-6.7B} version for evaluation.\footnote{\url{https://huggingface.co/Salesforce/blip2-opt-6.7b}}
+
+
+\noindent\textbf{InstructBLIP}~\citep{dai2023instructblip} employs an instruction-aware visual feature extraction module based on BLIP2~\citep{li2023blip2} and is trained with unified multimodal instruction tuning datasets. We choose \texttt{InstructBLIP-Vicuna-7B} for evaluation.\footnote{\url{https://huggingface.co/Salesforce/instructblip-vicuna-7b}}.
+
+
+
+\noindent\textbf{LLaVA}~\citep{liu2023llava},
+adopts Vicuna models as the backbone LLM and is trained on the ChatGPT/GPT-4 generated instruction tuning dataset.
+LLaVA-v1.5~\citep{liu2023llava15} improves on LLaVA models by employing curated task datasets and an enhanced modality alignment module.
+We evaluate both \texttt{LLaVA-v1.5-7B}\footnote{\url{https://huggingface.co/liuhaotian/llava-v1.5-7b}} and \texttt{LLaVA-v1.5-13B}.\footnote{\url{https://huggingface.co/liuhaotian/llava-v1.5-13b}}
+
+
+\noindent\textbf{Flamingo}~\citep{Alayrac2022FlamingoAV} pioneers the development of LVLMs by introducing a cross-gated layer for LLMs to produce visual-grounded text. The training dataset
+consists of interleaved visual data and text from the web pages, enabling it to generate free-form text as the output. We select the open-source implementation \texttt{OpenFlamingo-9B}~\citep{awadalla2023openflamingo} for evaluation.\footnote{\url{https://huggingface.co/openflamingo/OpenFlamingo-9B-vitl-mpt7b}}
+
+\noindent\textbf{IDEFICS} is another open-sourced implementation of Flamingo~\citep{Alayrac2022FlamingoAV} Trained on publicly available image-text alignment pairs and instruction tuning datasets, it demonstrates comparable results with the original closed-source model on various image-text benchmarks. We select the \texttt{IDEFICS-Instruct-9B} for evaluation.\footnote{\url{https://huggingface.co/HuggingFaceM4/idefics-9b-instruct}}.
+
+\noindent\textbf{Qwen-VL-Chat}~\citep{Qwen-VL} is
+a bilingual LVLM that supports both English and Chinese built on the Qwen LLM~\citep{qwen}. 
+During the training phase, Qwen-VL-Chat adopts a packing strategy to create multiple images as inputs,
+improving its ability to understand the vision context. We select the \texttt{Qwen-VL-Chat-7B} for evaluation.\footnote{\url{https://github.com/QwenLM/Qwen-VL}}
+
+
+
+\noindent\textbf{GPT-4V}
+~\citep{gpt4v}, the proprietary vision-language models developed by OpenAI, which are shown to be powerful on various multi-modal tasks~\citep{yang2023dawn}. The API version we queried is \texttt{gpt-4-vision-preview}.
+
+\noindent\textbf{Bard}~\citep{bard} (now Gemini), a commercial LVLM developed by Google. We utilize the unofficial API\footnote{\url{https://github.com/dsdanielpark/Bard-API}} querying the model with our task prompts, accessed on \texttt{2023-11-17}.
+
+
+\subsection{Task Prompts}
+We evaluate all the models with the same task prompts in our experiments, and the prompts for our four tasks are listed below:
+
+\begin{itemize}
+    \item Single-Figure Captioning:  \texttt{Create a caption for the provided figure.}
+    \item Multiple-Figure Captioning: \texttt{Create a caption for the provided figures.}
+    \item Contextualized Captioning: We reuse the prompts in previous captioning tasks depending on the current figure type.
+    \item Title Generation: \texttt{
+According to the figures and captions, generate a title for this paper. Title:} 
+\end{itemize}
+
+
+
+
+
+\section{Error Analysis}
+\label{apx:case}
+
+\subsection{Caption Type Illustration} 
+\label{apx:caption_type}
+We illustrate captions of four types in our main paper in Figure~\ref{fig:caption_type}. The \emph{Acceptable} caption provides a comprehensive description of the figure presented. The \emph{oversimplified} caption is too short compared with the original human-written caption. 
+Furthermore, as show in the third block in Figure~\ref{fig:caption_type}, \emph{Contextual Misinterpretation} refers to captions with unmentioned content in the figure, such as the dataset colored in red.
+\emph{Recognition Error} denotes the model wrongly identified the number or text in the figure, such as the misidentified model name in the last block of Figure~\ref{fig:caption_type}.
+
+\subsection{Failure Sample of MathVista}
+\label{apx:failure_mathvista}
+Figure~\ref{fig:geometry_fail} shows a challenging geometry mathematic reasoning problem where both models fail to produce the correct answer.
+Echoing the quantitative results in our main paper, we believe future studies can incorporate more focused corpus for enhancing the geometry and mathematical reasoning ability of LVLMs.
+\begin{figure*}[t!]
+    \centering
+    \includegraphics[width=\linewidth]{figs/caption_error_type.pdf}
+    \caption{Illustration of acceptable and three error types of generated captions.}
+    \label{fig:caption_type}
+\end{figure*}
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figs/mathvista_both_wrong.pdf}
+    \caption{A failure case on the geometry problem-solving task.}
+\label{fig:geometry_fail}
+\end{figure}
+\end{document}
