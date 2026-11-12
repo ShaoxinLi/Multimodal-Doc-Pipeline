@@ -18,7 +18,11 @@ htmlcov/
 
 # Generated artifacts
 out/
-samples/
+
+# Local samples
+/samples/*
+!/samples/README.md
+!/samples/urls.txt
 
 # Editor and operating-system files
 .idea/

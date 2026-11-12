@@ -7,12 +7,12 @@ import shutil
 import tempfile
 import time
 from collections.abc import Callable
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from contextvars import ContextVar
 from fcntl import LOCK_EX, LOCK_NB, flock
 from pathlib import Path
 from stat import S_ISREG
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
@@ -59,20 +59,22 @@ def provider_reason(value, *, secrets: tuple[str, ...] = ()) -> str | None:
     return reason[:512] or None
 
 
-def status_error(response: httpx.Response, stage: str, *, secrets: tuple[str, ...] = ()) -> PipelineError:
+def status_error(response: httpx.Response, stage: str, *, secrets: tuple[str, ...] = (),
+                 include_reason: bool = True) -> PipelineError:
     status = response.status_code
     code = "authentication_failed" if status in {401, 403} else f"http_{status}"
     reason = None
-    try:
-        value = response.json()
-    except (ValueError, RecursionError, httpx.ResponseNotRead):
-        pass
-    else:
-        if isinstance(value, dict):
-            detail = value.get("err_msg", value.get("msg"))
-            if detail is None and isinstance(value.get("error"), dict):
-                detail = value["error"].get("message")
-            reason = provider_reason(detail, secrets=secrets)
+    if include_reason:
+        try:
+            value = response.json()
+        except (ValueError, RecursionError, httpx.ResponseNotRead):
+            pass
+        else:
+            if isinstance(value, dict):
+                detail = value.get("err_msg", value.get("msg"))
+                if detail is None and isinstance(value.get("error"), dict):
+                    detail = value["error"].get("message")
+                reason = provider_reason(detail, secrets=secrets)
     return PipelineError(stage, code, status in {408, 429} or status >= 500, reason=reason)
 
 
@@ -103,6 +105,7 @@ RETRY_DELAY_SECONDS = 1
 
 def request_json(client: httpx.Client, stage: str, method: str, url: str,
                  *, timeout: float, deadline: float | None = None, retry_transport: bool = True,
+                 retry_http: bool = True, include_error_reason: bool = True,
                  retry_response_once: Callable[[dict], PipelineError | None] | None = None,
                  requests: RequestCounts | None = None,
                  on_response: Callable[[dict], None] | None = None,
@@ -130,7 +133,8 @@ def request_json(client: httpx.Client, stage: str, method: str, url: str,
                 on_response(value)
             if not response.is_success:
                 authorization = request.headers.get("Authorization", "")
-                raise status_error(response, stage, secrets=(authorization, authorization.removeprefix("Bearer ")))
+                raise status_error(response, stage, secrets=(authorization, authorization.removeprefix("Bearer ")),
+                                   include_reason=include_error_reason)
             if not isinstance(value, dict):
                 raise PipelineError(stage, "invalid_provider_response")
             retry = retry_response_once(value) if retry_response_once is not None else None
@@ -147,6 +151,8 @@ def request_json(client: httpx.Client, stage: str, method: str, url: str,
             raise PipelineError(stage, "invalid_provider_response") from None
         except PipelineError as exc:
             error = exc
+            if not retry_http:
+                raise
         if not error.retryable or response_retried or attempt + 1 == RETRY_ATTEMPTS:
             raise error
         retry_issue = error
@@ -172,6 +178,75 @@ def transfer_url(url: str) -> str:
             or (parsed.scheme == "http" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"})):
         raise PipelineError("parse", "unsafe_provider_url")
     return url
+
+
+def source_url(value: str, stage: str) -> httpx.URL:
+    try:
+        parsed = urlsplit(value)
+        url = httpx.URL(value)
+        query = tuple(part.encode("ascii") for part in value.partition("?")[1:])
+        if (
+            parsed.scheme not in {"http", "https"} or not url.host or "@" in parsed.netloc or "%" in url.host
+            or any(ord(char) <= 32 or ord(char) == 127 or char == "\\" for char in value)
+            or parsed.port == 0
+            or url.raw_path.partition(b"?")[1:] != query
+        ):
+            raise ValueError
+    except (ValueError, httpx.InvalidURL):
+        raise PipelineError(stage, "unsafe_source_url") from None
+    return url
+
+
+def _open_source(client: httpx.Client, url: httpx.URL, deadline: float) -> httpx.Response:
+    timeout = deadline - time.monotonic()
+    if timeout <= 0:
+        raise PipelineError("acquire", "source_download_timeout", True)
+    request = httpx.Request(
+        "GET", url, headers={"Accept-Encoding": "identity"},
+        extensions={"timeout": httpx.Timeout(timeout).as_dict()},
+    )
+    return client.send(request, auth=None, follow_redirects=False, stream=True)
+
+
+def capture_url(value: str, target: Path, limit: int, timeout: float, client: httpx.Client | None) -> str:
+    deadline = time.monotonic() + timeout
+    current = value
+    try:
+        with suppress_http_logging():
+            for redirect in range(6):
+                url = source_url(current, "acquire")
+                transport = nullcontext(client) if client is not None else httpx.Client(trust_env=False)
+                with transport as http, closing(_open_source(http, url, deadline)) as response:
+                    if response.is_redirect:
+                        location = response.headers.get("Location")
+                        if redirect == 5 or not location:
+                            raise PipelineError("acquire", "invalid_source_redirect")
+                        relative, separator, query = location.partition("#")[0].partition("?")
+                        current = urljoin(current, relative)
+                        if separator:
+                            current = current.partition("?")[0] + separator + query
+                        continue
+                    if not response.is_success:
+                        raise status_error(response, "acquire", include_reason=False)
+                    if response.status_code == 206:
+                        raise PipelineError("acquire", "invalid_source_response")
+                    if response.headers.get("Content-Type", "").partition(";")[0].strip().lower() in {
+                        "text/html", "application/xhtml+xml",
+                    }:
+                        raise PipelineError("acquire", "unsupported_html")
+                    if response.headers.get("Content-Encoding", "identity").lower() != "identity":
+                        raise PipelineError("acquire", "unsupported_source_content_encoding")
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with target.open("xb") as snapshot:
+                        return capture_bytes(response.iter_bytes(), snapshot, limit, "acquire", "source_too_large",
+                                             deadline=deadline)
+    except httpx.TimeoutException:
+        raise PipelineError("acquire", "source_download_timeout", True) from None
+    except httpx.TransportError:
+        raise PipelineError("acquire", "source_download_failed", True) from None
+    except (ValueError, httpx.InvalidURL):
+        raise PipelineError("acquire", "invalid_source_response") from None
+    raise PipelineError("acquire", "invalid_source_redirect")
 
 
 @contextmanager
@@ -218,7 +293,6 @@ def staging_directory(destination: Path):
 
 def capture_file(path: Path, target: Path, limit: int, error_code: str) -> str:
     target.parent.mkdir(parents=True, exist_ok=True)
-    checksum = hashlib.sha256()
     flags = os.O_RDONLY | os.O_NONBLOCK
     with os.fdopen(os.open(path, flags), "rb") as source, target.open("xb") as snapshot:
         info = os.fstat(source.fileno())
@@ -226,13 +300,19 @@ def capture_file(path: Path, target: Path, limit: int, error_code: str) -> str:
             raise PipelineError("intake", "invalid_input_file")
         if info.st_size > limit:
             raise PipelineError("intake", error_code)
-        remaining = limit
-        while data := source.read(min(1024 * 1024, remaining + 1)):
-            remaining -= len(data)
-            if remaining < 0:
-                raise PipelineError("intake", error_code)
-            checksum.update(data)
-            snapshot.write(data)
+        return capture_bytes(iter(lambda: source.read(1024 * 1024), b""), snapshot, limit, "intake", error_code)
+
+
+def capture_bytes(chunks, snapshot, limit: int, stage: str, error_code: str, *, deadline: float | None = None) -> str:
+    checksum = hashlib.sha256()
+    for data in chunks:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise PipelineError(stage, "source_download_timeout", True)
+        limit -= len(data)
+        if limit < 0:
+            raise PipelineError(stage, error_code)
+        checksum.update(data)
+        snapshot.write(data)
     return checksum.hexdigest()
 
 

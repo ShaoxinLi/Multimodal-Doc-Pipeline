@@ -69,7 +69,8 @@ def _parse_text(source: TextSource) -> list[TextBlock]:
 
 def parse_text_document(source: InputFile, source_ref: FileRef, output_dir: Path, *,
                         max_asset_bytes: int = Limits().max_source_bytes,
-                        output_root: Path | None = None, source_dir: Path | None = None) -> ParsedContent:
+                        output_root: Path | None = None, source_dir: Path | None = None,
+                        resolve_local_assets: bool = True) -> ParsedContent:
 
     suffix = source.path.suffix.lower().removeprefix(".")
     format_ = _SUFFIXES.get(suffix, suffix)
@@ -81,7 +82,8 @@ def parse_text_document(source: InputFile, source_ref: FileRef, output_dir: Path
         parsed_source = TextSource(raw.decode(source.encoding), source_ref)
     except (LookupError, UnicodeDecodeError) as exc:
         raise PipelineError("parse", "native_decode_error") from exc
-    resolve = AssetResolver(source.assets, output_dir, source_dir=source_dir or source.path.resolve().parent,
+    local_root = (source_dir or source.path.resolve().parent) if resolve_local_assets else None
+    resolve = AssetResolver(source.assets, output_dir, source_dir=local_root,
                             max_asset_bytes=max_asset_bytes, output_root=output_root)
     if parser is None:
         records, diagnostics = _parse_text(parsed_source), []

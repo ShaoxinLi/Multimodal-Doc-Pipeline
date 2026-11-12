@@ -13,7 +13,7 @@ flowchart TD
 	CLI["CLI · also used by Docker"] --> PIPE["pipeline.py · capture, validate, and coordinate"]
 	API["Python API"] --> PIPE
 	PIPE --> LOCAL["Local text parsers"]
-	PIPE --> REMOTE["MinerU client · upload, poll, download"]
+	PIPE --> REMOTE["MinerU client · submit, poll, download"]
 	REMOTE --> DECODE["Validate archive and decode blocks"]
 	LOCAL --> CONTENT["ParsedContent · blocks, assets, source evidence"]
 	DECODE --> CONTENT
@@ -31,7 +31,7 @@ flowchart TD
 	REPORT --> BATCH["run.json references document reports"]
 ```
 
-Text formats are parsed locally. PDF, Office, and image files are uploaded to MinerU. Both paths produce `ParsedContent`, so rendering and chunking do not depend on the input format or the provider's response schema.
+Text formats are parsed locally after any URL download. For PDF, Office, and image inputs, the pipeline uploads local files and submits URLs directly to MinerU. Both parsers produce `ParsedContent`, so rendering and chunking use the same data model.
 
 The coordinator captures inputs temporarily, records execution, and publishes the completed document output. Blocks, detailed selections, and provider archives stay in the processing workspace. `embeddings.jsonl` is created even when embedding is disabled, in which case it is empty.
 
@@ -41,7 +41,7 @@ The coordinator captures inputs temporarily, records execution, and publishes th
 
 This shared model separates three representations with different purposes.
 
-- The original file supplies source evidence and a SHA-256 digest.
+- The captured source file supplies source evidence and a SHA-256 digest. A MinerU URL uses the archived origin when available.
 - `content.md` supplies a readable rendering. Tables may remain HTML, and unsupported syntax may appear in fenced blocks.
 - Chunks supply text for retrieval. Their text need not be a substring of the rendered Markdown.
 
@@ -71,7 +71,7 @@ Parsing completeness and citation precision therefore answer different questions
 
 [`contracts/observations.py`](../src/doc_pipeline/contracts/observations.py) defines shared service observations, request counts, and embedding token usage. [`contracts/run.py`](../src/doc_pipeline/contracts/run.py) owns execution states, stage timing, grouped issues, and report snapshots. The pipeline maps parser diagnostics to output locations and derives result counts from the published payloads. The CLI derives its display status and exit code from the report.
 
-For batches, local documents run in a thread pool controlled by `local_workers`. Remote documents are submitted in groups controlled by `mineru.batch_size`. Local work can overlap remote acquisition. The final `run.json` preserves input order regardless of completion order.
+For batches, text documents run in a thread pool controlled by `local_workers`. MinerU uploads and URL submissions use separate groups controlled by `mineru.batch_size`. Text processing can overlap MinerU acquisition. The final `run.json` preserves input order regardless of completion order.
 
 Caught failures belong to individual files, so one failed document does not stop the remaining batch. Embedding issues identify affected chunks and leave parsed content available. A successful embedding response with missing vectors or repeated input indices triggers one resend of the same batch. If that resend fails, processing continues with the next batch. The Python single-file API raises fatal processing errors. The batch API records caught file errors in each document report. If a report is unavailable, the corresponding `run.json` entry carries the failure.
 

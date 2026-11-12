@@ -11,10 +11,11 @@
 | `embeddings.jsonl` | Successful embedding vectors, empty when embedding is disabled. |
 | `report.json` | Document checkpoint with source, stage, result, and issue details. |
 | `assets/` | Referenced media, when present. Paths are relative to the document output directory. |
+| `source/` | Captured source file for a URL input, when available. |
 
 JSON and JSONL use UTF-8. Each JSONL record ends with LF. Empty JSONL files contain zero bytes. Batch output also includes `run.json`, with per-file outputs in ordinal directories such as `0001/`.
 
-The pipeline captures the input bytes and downloads MinerU archives in private working directories. Published output contains the Markdown, chunk records, vectors, reports, and referenced media. `citations.source_uri` points to the original source.
+The pipeline captures input bytes and downloads MinerU archives in private working directories. For a text URL, it publishes the downloaded file in `source/`. For a MinerU URL, it publishes the selected `_origin` member as `source/origin.<extension>`. A converted member can have a different extension from the input URL. If the archive has no usable origin, the pipeline publishes the parsed output and records the source issue in `report.json`.
 
 The pipeline locks the output directory and keeps its inode, including on a mounted directory. It prepares the document files in private staging, installs the files, and then updates `report.json` to `completed`. Read the document files as published output only when `report.json` has `run.state = "completed"`. Output locking uses POSIX filesystem operations on macOS and Linux, including the Docker image.
 
@@ -41,7 +42,7 @@ Every row contains all nine citation fields.
 | Field | Meaning |
 | --- | --- |
 | `source_name` | Ingestion name or the caller-supplied display name. |
-| `source_uri` | Resolved original input file URI by default. The caller can supply an external URI that identifies this exact source version. |
+| `source_uri` | By default, the resolved local file URI or the input URL without its query and fragment. The caller can supply a canonical URI in `SourceIdentity`. |
 | `pages` | Sorted original PDF page positions as `{"number": 1, "label": null}` objects, or `null`. |
 | `slides` | Sorted original slide numbers, or `null`. |
 | `sheets` | Original sheets as `{"name": "Sheet1", "cells": null}` objects, or `null`. |
@@ -60,20 +61,24 @@ Source positioning describes the chunk body. Context included only in `embedding
 
 | Field | Meaning |
 | --- | --- |
-| `document_id` | Stable logical document ID supplied by the caller. The default UUID is derived from the resolved input path and changes on rename. |
+| `document_id` | Logical document ID supplied by the caller. The default UUID is derived from the resolved file URI or from the request URL with its query and without its fragment. Renewing a signed URL can change the default ID. |
 | `document_version` | Caller-supplied source revision, or `null`. |
-| `source_sha256` | SHA-256 of the captured input bytes. |
+| `source_sha256` | SHA-256 of the captured source bytes. For a MinerU URL, this hashes the archived origin and can change across runs. The value is `null` if MinerU parses the document without returning a usable origin. |
 | `chunk_sha256` | Fingerprint of the body, heading path, embedding input, and body media bytes. |
 | `source_type` | Lowercase input extension, such as `pdf` or `markdown`. |
 | `content_status` | `parsed` for interpreted body selections, `unparsed` for opaque body selections, or `partial` when both occur. |
 
-If your source system tracks document IDs and revisions, supply `SourceIdentity` to `process_file` or set it on each batch `InputFile`.
+To pass a URL from Python, use `UrlInput(url="https://example.org/document.md")` with `process_file` or `process_files`. For text URLs, provide any Markdown image files through `UrlInput.assets` or the CLI's single-input `--asset` option. The pipeline does not fetch linked assets or look for them on the local filesystem.
+
+If your source system tracks document IDs and revisions, supply `SourceIdentity` to `process_file` or set it on an `InputFile` or `UrlInput`.
 
 ### Original-source positions
 
 PDF page positions come from verified MinerU content and layout matches. When MinerU returns the submitted PDF unchanged, positions refer to the original directly. For a rewritten PDF, page correspondence requires equal page counts, equal decoded content streams for that page, and equal PDFium renders at 72 and 144 DPI with annotations and form widgets enabled. The comparison bounds render size and leaves optional-content configurations unresolved. Page labels come from the original PDF's valid page-label tree. Redundant numeric labels become `null`.
 
 PPTX positioning requires a byte-identical origin in the provider response, equal slide and group counts, and a unique match of nested text to the slide at the same ordinal. XLSX positioning requires a byte-identical origin and equal sheet and group counts. A single sheet or a uniquely matching sheet title supplies the sheet name. Cell coordinates stay `null`. Unverified original positions remain unavailable.
+
+For MinerU URLs, source positions refer to the file saved in `source/` when its format supports the requested position and the existing checks pass. For example, a PDF converted from a JPG input does not supply source PDF page numbers.
 
 ### Chunk fingerprint
 
@@ -135,7 +140,7 @@ The `source_uri` below illustrates the absolute file URI. Its directory depends 
 
 `citations.content_ranges` identifies inclusive, one-based line windows in `content.md`. Read those windows, expand them for surrounding context, or read the entire file. Adjacent chunk IDs identify neighboring chunks within the same output. Resolve each `assets` entry against that output directory.
 
-For the original document, use `citations.source_uri` with `pages`, `slides`, `sheets`, or `source_lines`. The caller owns access to that location and preservation of the source revision. `metadata.source_sha256` identifies the input bytes used for this run.
+For source positions in a URL run, open the file in `source/` if available. For a local file, use `citations.source_uri` with `pages`, `slides`, `sheets`, or `source_lines`. The caller owns access to that location and preservation of the source revision.
 
 ## `embeddings.jsonl`
 
@@ -150,7 +155,7 @@ The single-file API returns the same object that it writes to `report.json` on c
 | `schema_version` | Integer `2`. |
 | `pipeline` | Package `version` and build `revision`. Set `DOC_PIPELINE_REVISION` to supply a revision. The value is `null` when the variable is unset or empty. |
 | `run` | Run `id`, zero-based input `index`, UTC `started_at`, `elapsed_seconds`, and lifecycle `state`. A single-file call uses index `0`. |
-| `source` | Input `name`, `uri`, `document_id`, `document_version`, `format`, `sha256`, and `bytes`. The URI defaults to the resolved file URI. The digest and size come from the captured bytes and are `null` until capture completes. An unspecified document version is `"n/a"`. |
+| `source` | Input `name`, `uri`, `document_id`, `document_version`, `format`, `sha256`, and `bytes`. URI and identity follow the chunk defaults above. Digest and size come from the captured source and are `null` when it is unavailable. An unspecified document version is `"n/a"`. |
 | `stages` | Execution records for the seven stages below. |
 | `result` | Three distributions over the published chunks. |
 | `issues` | Grouped diagnostics, limitations, recovery actions, and failures. |
@@ -165,15 +170,15 @@ Each stage has a `state`, `seconds`, and `reason`. The states are `not_started`,
 
 | Stage | Work and additional fields |
 | --- | --- |
-| `intake` | Captures and validates the input. `encoding` is the configured text encoding for local formats and `"n/a"` for remote formats. |
-| `acquire` | Submits and uploads remote inputs, waits for MinerU, and downloads its archives. `service` is described below. Local formats use `"n/a"`. |
+| `intake` | Validates the input and captures local files. `encoding` is the configured text encoding for text formats and `"n/a"` for MinerU formats. |
+| `acquire` | Downloads text URLs or submits inputs to MinerU and downloads its archives. `service` describes MinerU activity and is `"n/a"` for text formats. |
 | `parse` | Parses local input or decodes the provider archive. |
 | `render` | Renders Markdown and records source block mappings. |
 | `chunk` | Builds chunks. `settings` contains `target_input_bytes` and `max_input_bytes`. |
 | `embed` | Generates vectors. `profile` contains `model`, requested `dimensions`, and `endpoint_sha256`. Provider-selected dimensions use `"n/a"`. `usage` is described below. A disabled stage uses `"n/a"` for both fields. |
 | `write` | Writes and installs the document files. |
 
-Run elapsed time uses a monotonic clock and includes time between stages. The terminal snapshot includes completed file installation and excludes the write of the snapshot itself. Acquisition time starts when the group is submitted and ends when the document's archive is downloaded or acquisition fails. It can include shared waits and download queuing. Acquisition intervals can overlap across documents. Use the batch's own elapsed time for the batch duration.
+Run elapsed time uses a monotonic clock and includes time between stages. The terminal snapshot includes completed file installation and excludes the write of the snapshot itself. MinerU acquisition time covers submission through archive download or failure. It can include shared waits and download queuing. Acquisition intervals can overlap across documents. Use the batch's own elapsed time for the batch duration.
 
 ### Service observations
 

@@ -14,7 +14,7 @@ from typing import Literal
 
 from doc_pipeline.chunking.citations import digest
 from doc_pipeline.contracts.config import Config
-from doc_pipeline.contracts.core import InputFile, PipelineError, merge_line_ranges
+from doc_pipeline.contracts.core import InputFile, PipelineError, SourceIdentity, UrlInput, merge_line_ranges
 from doc_pipeline.contracts.observations import EmbeddingUsage, MinerUObservation
 
 NA = "n/a"
@@ -26,7 +26,8 @@ StageState = Literal[
 ]
 RunState = Literal["running", "completed", "failed", "interrupted"]
 ProgressStage = Literal[
-    "intake", "upload", "remote_parse", "download", "parse", "embedding", "complete", "partial", "failed",
+    "intake", "source_download", "upload", "remote_parse", "download", "parse", "embedding",
+    "complete", "partial", "failed",
 ]
 
 
@@ -171,7 +172,7 @@ class Failure:
 class ExecutionRecord:
     clock: RunClock
     index: int
-    source: InputFile
+    source: InputFile | UrlInput
     config: Config
     on_progress: ProgressCallback | None = field(default=None, repr=False)
     on_checkpoint: Callable[[dict], None] | None = field(default=None, repr=False)
@@ -187,10 +188,15 @@ class ExecutionRecord:
     failed_stage: StageName | None = None
     failure_at: RunInstant | None = None
     failure: Failure | None = None
+    local_target: Path | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self.kind = self.source.path.suffix.lower().lstrip(".")
-        if self.kind in NATIVE_FORMATS:
+        if isinstance(self.source, UrlInput):
+            self.path = Path(self.source.filename or "URL input")
+        else:
+            self.path = self.source.path
+        self.kind = self.path.suffix.lower().lstrip(".")
+        if self.kind in NATIVE_FORMATS and isinstance(self.source, InputFile):
             self.stages["acquire"].state = "not_applicable"
         if self.config.embedding is None:
             self.stages["embed"].state = "skipped"
@@ -198,8 +204,23 @@ class ExecutionRecord:
             self.result["embedding"] = NA
 
     @property
-    def path(self) -> Path:
-        return self.source.path
+    def identity(self) -> SourceIdentity:
+        custom = self.source.identity
+        if isinstance(self.source, UrlInput):
+            default_uri = self.source.durable_uri
+            identity_key = self.source.request_url
+        else:
+            default_uri = (self.local_target or self.path.resolve()).as_uri()
+            identity_key = default_uri
+        uri = custom.uri if custom and custom.uri else default_uri
+        if isinstance(self.source, UrlInput):
+            uri = uri.partition("#")[0].partition("?")[0]
+        return SourceIdentity(
+            document_id=custom.document_id if custom else str(uuid.uuid5(uuid.NAMESPACE_URL, identity_key)),
+            version=custom.version if custom else None,
+            name=(custom.name if custom and custom.name else self.path.name) or None,
+            uri=uri or None,
+        )
 
     @property
     def status(self) -> Literal["complete", "partial", "failed"]:
@@ -282,14 +303,14 @@ class ExecutionRecord:
             raise
 
     def source_snapshot(self) -> dict:
-        path = self.source.path.resolve()
-        identity = self.source.identity
-        uri = identity.uri if identity and identity.uri else path.as_uri()
+        identity = self.identity
+        name = identity.name
+        if isinstance(self.source, InputFile) and not (self.source.identity and self.source.identity.name):
+            name = (self.local_target or self.path.resolve()).name
         return {
-            "name": identity.name if identity and identity.name else path.name,
-            "uri": uri,
-            "document_id": identity.document_id if identity else str(uuid.uuid5(uuid.NAMESPACE_URL, path.as_uri())),
-            "document_version": identity.version if identity and identity.version is not None else NA,
+            "name": name, "uri": identity.uri,
+            "document_id": identity.document_id,
+            "document_version": identity.version if identity.version is not None else NA,
             "format": self.kind, "sha256": self.sha256, "bytes": self.source_bytes,
         }
 

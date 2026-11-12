@@ -12,12 +12,13 @@ from time import monotonic
 from pydantic import ValidationError
 
 from doc_pipeline.contracts.config import Config
-from doc_pipeline.contracts.core import InputFile, PipelineError
+from doc_pipeline.contracts.core import InputFile, PipelineError, UrlInput
 from doc_pipeline.contracts.run import ProgressEvent
 from doc_pipeline.pipeline import process_file, process_files
 
 _STAGE_LABELS = {
     "intake": "Checking input",
+    "source_download": "Downloading source",
     "upload": "Submitting to MinerU",
     "remote_parse": "Waiting for MinerU",
     "download": "Downloading the MinerU result",
@@ -196,7 +197,7 @@ class _HideCompletionLog(logging.Filter):
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="doc-pipeline", description="Process files into an empty directory")
-    parser.add_argument("input", type=Path, nargs="+")
+    parser.add_argument("input", nargs="+", help="Local path or direct HTTP(S) document URL")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--config", type=Path, help="TOML configuration shared with the Python API")
     parser.add_argument("--encoding", default="utf-8")
@@ -232,15 +233,25 @@ def main(argv=None) -> int:
     previous_handler = signal.signal(signal.SIGTERM, signal.default_int_handler)
     try:
         config = Config.from_toml(args.config) if args.config else Config()
+        assets = dict(args.asset)
+        inputs = [
+            UrlInput(url=value, encoding=args.encoding, assets=assets)
+            if value.lower().startswith(("http://", "https://"))
+            else InputFile(path=Path(value), encoding=args.encoding, assets=assets)
+            for value in args.input
+        ]
         with (TerminalProgress() if show_progress else nullcontext()) as progress:
-            if len(args.input) == 1:
-                report = process_file(args.input[0], args.out, config, assets=dict(args.asset), encoding=args.encoding,
-                                      on_progress=progress)
+            if len(inputs) == 1:
+                item = inputs[0]
+                if isinstance(item, UrlInput):
+                    report = process_file(item, args.out, config, on_progress=progress)
+                else:
+                    report = process_file(item.path, args.out, config, assets=item.assets,
+                                          encoding=item.encoding, on_progress=progress)
                 documents = None
                 code = 75 if _embedding_failed(report) else 0
             else:
-                report = process_files([InputFile(path=path, encoding=args.encoding) for path in args.input],
-                                       args.out, config, on_progress=progress)
+                report = process_files(inputs, args.out, config, on_progress=progress)
                 documents = _batch_documents(report, args.out)
                 code = _batch_exit_code(report, documents)
         if text_output:

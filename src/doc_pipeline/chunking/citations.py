@@ -235,7 +235,7 @@ class Citations:
         return result
 
 
-def export_chunks(chunks: list[Chunk], parsed: ParsedContent, *, source: FileRef, identity: SourceIdentity,
+def export_chunks(chunks: list[Chunk], parsed: ParsedContent, *, source: FileRef | None, identity: SourceIdentity,
                   source_type: str, asset_digests: dict[str, str]):
     blocks = {block.id: block for block in parsed.blocks}
     page_labels = {page.number: page.label for page in parsed.pdf_pages if page.basis != "unmapped"}
@@ -295,7 +295,8 @@ def export_chunks(chunks: list[Chunk], parsed: ParsedContent, *, source: FileRef
                 location_status=("known" if all(coverage) else "partial") if any(coverage) else "unavailable",
             ),
             metadata=ChunkMetadata(
-                document_id=identity.document_id, document_version=identity.version, source_sha256=source.sha256,
+                document_id=identity.document_id, document_version=identity.version,
+                source_sha256=source.sha256 if source else None,
                 chunk_sha256=chunk_digest(chunk.body, chunk.heading_path, chunk.embedding_input,
                                           [asset_digests[key] for key in uses]),
                 source_type=source_type,

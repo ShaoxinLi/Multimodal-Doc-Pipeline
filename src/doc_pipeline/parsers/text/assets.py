@@ -44,10 +44,10 @@ def safe_link(reference: str) -> bool:
 
 class AssetResolver:
     def __init__(self, snapshots: dict[str, Path], output_dir: Path, *,
-                 source_dir: Path, max_asset_bytes: int, output_root: Path | None = None):
+                 source_dir: Path | None, max_asset_bytes: int, output_root: Path | None = None):
         self.snapshots = snapshots
         self.output_dir = output_dir
-        self.source_dir = source_dir.resolve()
+        self.source_dir = source_dir.resolve() if source_dir is not None else None
         self.output_root = (output_root or output_dir).resolve()
         self.max_asset_bytes = max_asset_bytes
         self.diagnostics: list[Diagnostic] = []
@@ -79,7 +79,7 @@ class AssetResolver:
             key = path.as_posix()
             missing = "missing_snapshot"
         snapshot = self.snapshots.get(key)
-        if snapshot is None and missing == "external_unarchived":
+        if snapshot is None and (missing == "external_unarchived" or self.source_dir is None):
             return missing, None
         try:
             if snapshot is None:

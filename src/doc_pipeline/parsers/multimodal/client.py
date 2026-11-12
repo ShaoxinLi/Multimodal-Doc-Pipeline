@@ -11,7 +11,7 @@ from urllib.parse import quote
 import httpx
 
 from doc_pipeline.contracts.config import Config, Limits, api_key
-from doc_pipeline.contracts.core import InputFile, PipelineError
+from doc_pipeline.contracts.core import InputFile, PipelineError, UrlInput
 from doc_pipeline.contracts.observations import (
     MinerUIssueCallback,
     MinerUObservation,
@@ -75,6 +75,7 @@ _MINERU_ERRORS: dict[str, _MinerUErrorSpec] = {
     "-60020": _MinerUErrorSpec("mineru_file_split_failed", True),
     "-60021": _MinerUErrorSpec("mineru_page_count_failed", True),
     "-60022": _MinerUErrorSpec("mineru_webpage_fetch_failed", True),
+    "-60023": _MinerUErrorSpec("mineru_url_fetch_failed", False),
 }
 
 
@@ -96,34 +97,51 @@ class ArchiveFailure(ArchiveResult):
     finished: RunInstant
 
 
+class _RejectedSourceUrls(PipelineError):
+    pass
+
+
 @dataclass
 class _Submission:
     index: int
-    source: InputFile
+    source: InputFile | UrlInput
     observation: MinerUObservation = field(default_factory=lambda: MinerUObservation(uuid.uuid4().hex))
 
 
+@dataclass
+class _AcceptedBatch:
+    id: str
+    submitted: dict[str, _Submission]
+    pending: dict[str, _Submission]
+
+
 def _api(client, config: Config, deadline: float, method, route, *,
-         requests: RequestCounts, on_issue: ServiceIssueCallback | None = None, **kwargs):
+         requests: RequestCounts, on_issue: ServiceIssueCallback | None = None,
+         direct: bool = False, **kwargs):
     key = api_key("MINERU_API_KEY", config.mineru.api_key)
     if not key:
         raise PipelineError("parse", "missing_mineru_credentials")
     value = request_json(client, "parse", method,
                          config.mineru.api_base_url + route,
                          timeout=config.request_timeout_seconds, deadline=deadline,
-                         retry_transport=method != "POST",
+                         retry_transport=method != "POST", retry_http=not direct or method != "POST",
+                         include_error_reason=not direct,
                          requests=requests, on_issue=on_issue,
                          headers={"Authorization": "Bearer " + key}, **kwargs)
-    provider_code = value.get("code")
+    provider_code, data = value.get("code"), value.get("data")
     if type(provider_code) is not int or provider_code != 0:
         error = _MINERU_REQUEST_REJECTED
         if type(provider_code) is int or type(provider_code) is str:
             error = _MINERU_ERRORS.get(str(provider_code), error)
-        raise PipelineError("parse", error.code, error.retryable,
-                            reason=provider_reason(value.get("err_msg", value.get("msg")), secrets=(key,)))
-    if not isinstance(value.get("data"), dict):
+        if (direct and method == "POST" and error.code == "mineru_url_fetch_failed"
+                and (data is None or isinstance(data, dict) and data.get("batch_id") in (None, ""))):
+            raise _RejectedSourceUrls("parse", error.code, error.retryable,
+                                      reason="MinerU cannot fetch one or more source URLs from its region")
+        reason = None if direct else provider_reason(value.get("err_msg", value.get("msg")), secrets=(key,))
+        raise PipelineError("parse", error.code, error.retryable, reason=reason)
+    if not isinstance(data, dict):
         raise PipelineError("parse", "invalid_provider_response")
-    return value["data"]
+    return data
 
 
 def _transfer(client, method, url, timeout, *, requests: RequestCounts, stream=False, **kwargs):
@@ -159,7 +177,8 @@ def _upload(client, url: str, path: Path, timeout: float, *, requests: RequestCo
 
 
 def _download(client, url: str, target: Path, timeout: float, *,
-              requests: RequestCounts, on_issue: ServiceIssueCallback | None = None) -> None:
+              requests: RequestCounts, on_issue: ServiceIssueCallback | None = None,
+              include_error_reason: bool = True) -> None:
     partial = target.with_suffix(".part")
     max_bytes = Limits().max_zip_bytes
     retry_issue = None
@@ -176,7 +195,7 @@ def _download(client, url: str, target: Path, timeout: float, *,
                         current = str(response.url.join(response.headers["location"]))
                         continue
                     if not response.is_success:
-                        raise status_error(response, "parse")
+                        raise status_error(response, "parse", include_reason=include_error_reason)
                     size = 0
                     with partial.open("wb") as output:
                         for chunk in response.iter_bytes(1024 * 1024):
@@ -218,7 +237,7 @@ def _poll_rows(data: dict, submitted: dict[str, _Submission]) -> dict[str, dict]
     return indexed
 
 
-def obtain_archives(sources: list[tuple[int, InputFile]], config: Config, client: httpx.Client,
+def obtain_archives(sources: list[tuple[int, InputFile | UrlInput]], config: Config, client: httpx.Client,
                     work: Path, *, on_progress: ProgressCallback | None = None,
                     requests: MinerURequests | None = None,
                     on_issue: MinerUIssueCallback | None = None,
@@ -228,14 +247,13 @@ def obtain_archives(sources: list[tuple[int, InputFile]], config: Config, client
     start = time.monotonic()
     requests = requests if requests is not None else MinerURequests()
     deadline = start + config.mineru.timeout_seconds
-    submitted = {item.observation.data_id: item for item in (_Submission(*source) for source in sources)}
-    pending = submitted.copy()
+    submissions = [_Submission(*source) for source in sources]
+    direct = bool(submissions and isinstance(submissions[0].source, UrlInput))
+    submit_route = "/api/v4/extract/task/batch" if direct else "/api/v4/file-urls/batch"
     downloads: list[tuple[_Submission, str]] = []
     results: dict[int, ArchiveSuccess | ArchiveFailure] = {}
     options = config.mineru.parse_options()
     is_ocr = options.pop("is_ocr")
-    files = [{"name": item.source.path.name, "data_id": data_id, "is_ocr": is_ocr}
-             for data_id, item in submitted.items()]
 
     def fail(item: _Submission, error: PipelineError, elapsed: float) -> None:
         results[item.index] = ArchiveFailure(item.index, item.observation, elapsed, error, RunInstant.now())
@@ -246,48 +264,84 @@ def obtain_archives(sources: list[tuple[int, InputFile]], config: Config, client
         if on_observation is not None:
             on_observation(item.index, item.observation)
 
-    def shared_issue(code: str, reason: str | None, action: str, retryable: bool) -> None:
-        if on_issue is not None:
-            for item in pending.values():
-                on_issue(item.index, code, reason, action, retryable)
-
     def progress(item: _Submission, stage: ProgressStage, completed: int | None = None,
                  total: int | None = None) -> None:
         if on_progress is not None:
-            on_progress(ProgressEvent(item.index, item.source.path, stage, completed, total))
+            path = Path(item.source.filename) if isinstance(item.source, UrlInput) else item.source.path
+            on_progress(ProgressEvent(item.index, path, stage, completed, total))
 
-    for item in submitted.values():
+    for item in submissions:
         observe(item)
-        progress(item, "upload")
-    try:
-        data = _api(client, config, deadline, "POST", "/api/v4/file-urls/batch",
-                    requests=requests.submit, on_issue=shared_issue,
-                    json={**options, "files": files})
-        urls, batch_id = data.get("file_urls"), data.get("batch_id")
-        if (not isinstance(batch_id, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", batch_id)
-                or batch_id in {".", ".."} or not isinstance(urls, list) or len(urls) != len(files)):
-            raise PipelineError("parse", "invalid_provider_response")
-        for item in submitted.values():
-            item.observation.batch_id = batch_id
-            observe(item)
-        for (data_id, item), url in zip(submitted.items(), urls, strict=True):
-            timeout = bounded_timeout(config.request_timeout_seconds, deadline)
-            try:
-                if not isinstance(url, str):
-                    raise PipelineError("parse", "invalid_provider_response")
-                _upload(client, url, item.source.path, timeout, requests=requests.upload)
-                progress(item, "remote_parse")
-            except PipelineError as error:
-                fail(pending.pop(data_id), error, time.monotonic() - start)
-            except httpx.InvalidURL:
-                fail(pending.pop(data_id), PipelineError("parse", "unsafe_provider_url"),
-                     time.monotonic() - start)
-        route = "/api/v4/extract-results/batch/" + quote(batch_id, safe="")
-        while pending:
-            data = _api(client, config, deadline, "GET", route, requests=requests.poll, on_issue=shared_issue)
-            if "batch_id" in data and data["batch_id"] != batch_id:
+        progress(item, "remote_parse" if direct else "upload")
+
+    def issues_for(pending: dict[str, _Submission]) -> ServiceIssueCallback:
+        def notify(code: str, reason: str | None, action: str, retryable: bool) -> None:
+            if on_issue is not None:
+                for item in pending.values():
+                    on_issue(item.index, code, reason, action, retryable)
+        return notify
+
+    accepted = []
+
+    def submit(group: list[_Submission]) -> None:
+        submitted = {item.observation.data_id: item for item in group}
+        pending = submitted.copy()
+        notify = issues_for(pending)
+        files = []
+        for data_id, item in submitted.items():
+            file = {"url": item.source.request_url} if isinstance(item.source, UrlInput) else {
+                "name": item.source.path.name,
+            }
+            files.append({**file, "data_id": data_id, "is_ocr": is_ocr})
+
+        try:
+            data = _api(client, config, deadline, "POST", submit_route, requests=requests.submit,
+                        on_issue=notify, direct=direct, json={**options, "files": files})
+            urls, batch_id = data.get("file_urls"), data.get("batch_id")
+            if (not isinstance(batch_id, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", batch_id)
+                    or batch_id in {".", ".."}):
+                raise PipelineError("parse", "invalid_provider_response")
+            if not direct and (not isinstance(urls, list) or len(urls) != len(files)):
+                raise PipelineError("parse", "invalid_provider_response")
+            for item in submitted.values():
+                item.observation.batch_id = batch_id
+                observe(item)
+            if not direct:
+                for (data_id, item), url in zip(submitted.items(), urls, strict=True):
+                    timeout = bounded_timeout(config.request_timeout_seconds, deadline)
+                    try:
+                        if not isinstance(url, str):
+                            raise PipelineError("parse", "invalid_provider_response")
+                        _upload(client, url, item.source.path, timeout, requests=requests.upload)
+                        progress(item, "remote_parse")
+                    except PipelineError as error:
+                        fail(pending.pop(data_id), error, time.monotonic() - start)
+                    except httpx.InvalidURL:
+                        fail(pending.pop(data_id), PipelineError("parse", "unsafe_provider_url"),
+                             time.monotonic() - start)
+        except PipelineError as error:
+            if isinstance(error, _RejectedSourceUrls) and len(group) > 1:
+                notify(error.code, error.reason, "split", error.retryable)
+                mid = len(group) // 2
+                submit(group[:mid])
+                submit(group[mid:])
+            else:
+                elapsed = time.monotonic() - start
+                for item in pending.values():
+                    fail(item, error, elapsed)
+        else:
+            if pending:
+                accepted.append(_AcceptedBatch(batch_id, submitted, pending))
+
+    def poll(batch: _AcceptedBatch) -> None:
+        route = "/api/v4/extract-results/batch/" + quote(batch.id, safe="")
+        pending = batch.pending
+        try:
+            data = _api(client, config, deadline, "GET", route, requests=requests.poll,
+                        on_issue=issues_for(pending), direct=direct)
+            if "batch_id" in data and data["batch_id"] != batch.id:
                 raise PipelineError("parse", "provider_identity_mismatch")
-            for data_id, row in _poll_rows(data, submitted).items():
+            for data_id, row in _poll_rows(data, batch.submitted).items():
                 if data_id not in pending:
                     continue
                 item = pending[data_id]
@@ -306,18 +360,26 @@ def obtain_archives(sources: list[tuple[int, InputFile]], config: Config, client
                 elapsed = time.monotonic() - start
                 if state == "failed":
                     key = api_key("MINERU_API_KEY", config.mineru.api_key)
-                    fail(item, PipelineError("parse", "mineru_parse_failed",
-                                             reason=provider_reason(row.get("err_msg"), secrets=(key,))), elapsed)
+                    reason = None if direct else provider_reason(row.get("err_msg"), secrets=(key,))
+                    fail(item, PipelineError("parse", "mineru_parse_failed", reason=reason), elapsed)
                 elif not isinstance(row.get("full_zip_url"), str):
                     fail(item, PipelineError("parse", "invalid_provider_response"), elapsed)
                 else:
                     downloads.append((item, row["full_zip_url"]))
-            if pending:
-                time.sleep(bounded_timeout(POLL_INTERVAL_SECONDS, deadline))
-    except PipelineError as error:
-        elapsed = time.monotonic() - start
-        for item in pending.values():
-            fail(item, error, elapsed)
+        except PipelineError as error:
+            elapsed = time.monotonic() - start
+            for item in pending.values():
+                fail(item, error, elapsed)
+            pending.clear()
+
+    if submissions:
+        submit(submissions)
+    while accepted:
+        for batch in accepted:
+            poll(batch)
+        accepted = [batch for batch in accepted if batch.pending]
+        if accepted:
+            time.sleep(max(0, min(POLL_INTERVAL_SECONDS, deadline - time.monotonic())))
 
     for item, url in downloads:
         progress(item, "download")
@@ -329,7 +391,7 @@ def obtain_archives(sources: list[tuple[int, InputFile]], config: Config, client
 
         try:
             _download(client, url, archive, config.request_timeout_seconds,
-                      requests=requests.download, on_issue=download_issue)
+                      requests=requests.download, on_issue=download_issue, include_error_reason=not direct)
         except PipelineError as error:
             fail(item, error, time.monotonic() - start)
         except OSError:

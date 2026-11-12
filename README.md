@@ -4,7 +4,7 @@
 
 Turn documents into Markdown, structured chunks, and source citations for retrieval pipelines. Add embeddings with an OpenAI-compatible service. Run through the CLI, Python API, or Docker.
 
-Text formats run locally without an API key. PDF, Office, and image files are uploaded to [MinerU](https://github.com/opendatalab/MinerU) and require a MinerU API key.
+Text formats run locally without an API key. PDF, Office, and image inputs use [MinerU](https://github.com/opendatalab/MinerU) and require a MinerU API key.
 
 [Quick start](#quick-start) · [Get the Docker image](#get-the-docker-image) · [Configuration](#configuration) · [Outputs](#outputs) · [Documentation](#documentation)
 
@@ -33,6 +33,19 @@ cat path/to/output/report.json
 ```
 
 Check `result.chunks`, `result.embedding`, and `issues`. Exit code `0` can still mean partial parsing.
+
+### Try a sample
+
+[The sample URL list](samples/urls.txt) contains one direct download URL per input. Each URL uses the full Git commit SHA so that you can download the same file again.
+
+From the project root, process a plain-text URL without an API key.
+
+```sh
+uv run doc-pipeline "$(grep '/samples/txt/txt_001_rfc_rfc2119_key_words\.txt$' samples/urls.txt)" \
+	--out path/to/sample-output
+```
+
+To download all samples and their assets, use the [sample archive](https://github.com/ShaoxinLi/Multimodal-Doc-Pipeline/archive/9174b2a3788620e9dc9615834da8015cf458e43e.tar.gz). Copy the contents of the archive's `samples/` directory into your local `samples/` directory. Keep each document and its `assets/` directory together so that relative paths resolve.
 
 ## Get the Docker image
 
@@ -82,6 +95,8 @@ To show progress and a summary in Docker, add `--progress --format text` after t
 | Images | `.png`, `.jpg`, `.jpeg`, `.jp2`, `.webp`, `.gif`, `.bmp` | MinerU |
 
 Inputs are limited to 200 MB per file and 200 pages per PDF. HTML and encrypted PDFs are unsupported.
+
+You can mix local paths and HTTP(S) file URLs in one command. Use a supported extension in the URL path and quote signed URLs. The pipeline downloads text inputs and submits PDF, Office, and image URLs directly to MinerU. If MinerU cannot access a URL, download the file separately and run the command with its local path.
 
 ## Configuration
 

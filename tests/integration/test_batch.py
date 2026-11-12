@@ -1,16 +1,20 @@
 import json
 import logging
+import socket
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import datetime, timedelta
+from io import BytesIO
 from threading import Barrier, BrokenBarrierError, Event, Lock
 from types import SimpleNamespace
+from zipfile import ZipFile
 
 import httpx
 import pytest
 from docutils.parsers.rst import roles
 
-from doc_pipeline import Config, InputFile, PipelineError, pipeline, process_files
+from doc_pipeline import Config, InputFile, PipelineError, UrlInput, pipeline, process_file, process_files
+from doc_pipeline.chunking.citations import digest
 from doc_pipeline.cli import main
 from doc_pipeline.contracts import run as run_contract
 from doc_pipeline.contracts.observations import MinerURequests
@@ -96,6 +100,162 @@ def run_batch(paths, output, provider, *, on_progress=None, **overrides):
         assert not http.is_closed
     assert json.loads((output / "run.json").read_text()) == run
     return run
+
+
+@pytest.fixture
+def direct_url_config(monkeypatch):
+    monkeypatch.setattr(
+        socket, "getaddrinfo",
+        lambda *args, **kwargs: pytest.fail("MinerU URL submission must not resolve the source locally"),
+    )
+    monkeypatch.delenv("MINERU_API_KEY", raising=False)
+
+
+def test_direct_urls_split_rejected_batch_and_keep_healthy_inputs_in_order(tmp_path, direct_url_config, caplog):
+    caplog.set_level(logging.DEBUG)
+    source = write_source_pdf(tmp_path)
+    archive_pdf = pdf_bytes()
+    archive = BytesIO()
+    with ZipFile(BytesIO(document_archive(archive_pdf))) as base, ZipFile(archive, "w") as modified:
+        for name in base.namelist():
+            data = base.read(name)
+            if name.endswith(".json"):
+                before, _, after = data.rpartition(b"Repeated paragraph.")
+                data = before + b"Unique second paragraph." + after
+            modified.writestr(name, data)
+        modified.writestr("invalid_origin.pdf", b"invalid")
+    first = "https://source.test/first%2EPDF?key=first-signature&escaped=%2f%2F"
+    bad = "https://source.test/bad.pdf?key=bad-signature"
+    last = "http://source.test/last.jpg?key=last-signature"
+    direct_ids, direct_submissions, batches, calls = {}, [], {}, []
+
+    def handle(request):
+        method, host, path = request.method, request.url.host, request.url.path
+        calls.append((method, host, path))
+        if host == "storage.test":
+            assert not request.headers.get("Authorization")
+            if method == "PUT":
+                assert path == "/upload" and request.content == source.read_bytes()
+                return httpx.Response(200)
+            return httpx.Response(200, content=archive.getvalue())
+        assert host == "mineru.test"
+        if method == "POST":
+            payload = json.loads(request.content)
+            files = payload.pop("files")
+            assert payload["enable_formula"] is False
+            assert all(file["is_ocr"] is True for file in files)
+            if path == "/api/v4/file-urls/batch":
+                assert [file["name"] for file in files] == ["input.pdf"]
+                batches["upload"] = files
+                return ok(batch_id="upload", file_urls=["https://storage.test/upload"])
+            assert path == "/api/v4/extract/task/batch"
+            urls = [file["url"] for file in files]
+            direct_submissions.append(urls)
+            for file in files:
+                assert set(file) == {"url", "data_id", "is_ocr"}
+                assert direct_ids.setdefault(file["url"], file["data_id"]) == file["data_id"]
+            if bad in urls:
+                return httpx.Response(200, json={"code": -60023, "msg": "Could not fetch bad-signature"})
+            batch_id = f"direct-{len(direct_submissions)}"
+            batches[batch_id] = files
+            return ok(batch_id=batch_id)
+        assert method == "GET" and path.startswith("/api/v4/extract-results/batch/")
+        batch_id = path.rsplit("/", 1)[1]
+        if batch_id != "upload":
+            assert len(direct_submissions) == 5
+        return ok(batch_id=batch_id, extract_result=[
+            {"data_id": file["data_id"], "state": "done", "full_zip_url": "https://storage.test/result"}
+            for file in batches[batch_id]
+        ])
+
+    progress = []
+    inputs = [UrlInput(url=first + "#ignore"), source, UrlInput(url=bad), UrlInput(url=last)]
+    out = tmp_path / "out"
+    run = run_batch(inputs, out, SimpleNamespace(handle=handle), on_progress=progress.append,
+                    is_ocr=True, enable_formula=False)
+    assert direct_submissions == [[first, bad, last], [first], [bad, last], [bad], [last]]
+    assert [method for method, _, _ in calls].count("PUT") == 1
+    assert run["mineru_requests"] == {
+        "submit": {"requests": 6, "responses": 6}, "poll": {"requests": 3, "responses": 3},
+        "upload": {"requests": 1, "responses": 1}, "download": {"requests": 3, "responses": 3},
+    }
+    reports = read_batch_reports(out, run)
+    assert [item["run"]["state"] for item in reports] == ["completed", "completed", "failed", "completed"]
+    assert [item["source"]["name"] for item in reports] == ["first.PDF", "input.pdf", "bad.pdf", "last.jpg"]
+    assert failure_issue(reports[2], "acquire")["code"] == "mineru_url_fetch_failed"
+    assert any(issue["action"] == "split" for issue in reports[0]["issues"])
+    for index, suffix in ((0, "pdf"), (3, "jpg")):
+        root = out / f"{index + 1:04d}"
+        report, chunks, _ = read_output(root)
+        assert report["source"]["format"] == suffix
+        assert report["source"]["sha256"] == digest(archive_pdf)
+        assert report["source"]["bytes"] == len(archive_pdf)
+        assert (root / "source" / "origin.pdf").read_bytes() == archive_pdf
+        assert all(chunk["metadata"]["source_type"] == suffix
+                   and chunk["metadata"]["source_sha256"] == digest(archive_pdf) for chunk in chunks)
+        assert all(bool(chunk["citations"]["pages"]) == (suffix == "pdf") for chunk in chunks)
+        assert all(event.path.name == report["source"]["name"] and event.stage != "upload"
+                   for event in progress if event.index == index)
+    redacted = caplog.text + "".join(path.read_text() for path in out.rglob("*.json")) + repr(progress)
+    assert "-signature" not in redacted
+
+
+@pytest.mark.parametrize("mode", ["missing", "ambiguous", "invalid"])
+def test_url_archives_without_usable_origin_keep_content_with_no_source_hash(tmp_path, direct_url_config, mode):
+    original = pdf_bytes()
+    raw_zip = BytesIO()
+    with ZipFile(BytesIO(document_archive(original))) as source, ZipFile(raw_zip, "w") as target:
+        for name in source.namelist():
+            if not name.endswith("_origin.pdf"):
+                target.writestr(name, source.read(name))
+        if mode == "ambiguous":
+            for prefix in ("one", "two"):
+                target.writestr(f"{prefix}_origin.pdf", original)
+        elif mode == "invalid":
+            target.writestr("bad_origin.pdf", b"invalid")
+
+    data_id = None
+
+    def handle(request):
+        nonlocal data_id
+        if request.method == "POST":
+            data_id = json.loads(request.content)["files"][0]["data_id"]
+            return ok(batch_id="direct")
+        if request.url.host == "mineru.test":
+            return ok(extract_result=[{
+                "data_id": data_id, "state": "done", "full_zip_url": "https://storage.test/result",
+            }])
+        return httpx.Response(200, content=raw_zip.getvalue())
+
+    out = tmp_path / "out"
+    config = Config(mineru={"api_base_url": "https://mineru.test", "api_key": "mineru-secret"})
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        process_file(UrlInput(url="https://source.test/document.pdf"), out, config, client=client)
+    report, chunks, _ = read_output(out)
+    assert report["run"]["state"] == "completed" and report["source"]["bytes"] is None
+    assert report["source"]["sha256"] is None and not (out / "source").exists()
+    assert f"mineru_origin_{mode}" in {issue["code"] for issue in report["issues"]}
+    assert chunks and all(chunk["metadata"]["source_sha256"] is None for chunk in chunks)
+    assert all(chunk["citations"]["location_status"] == "unavailable" for chunk in chunks)
+
+
+@pytest.mark.parametrize("mode", ["http", "transport", "batch_id"])
+def test_direct_urls_never_resubmit_ambiguous_submission(tmp_path, direct_url_config, mode):
+    calls = []
+
+    def handle(request):
+        calls.append(request)
+        if mode == "transport":
+            raise httpx.ReadError("response was lost")
+        if mode == "http":
+            return httpx.Response(503, json={"code": -60023})
+        return httpx.Response(200, json={"code": -60023, "data": {"batch_id": "already-created"}})
+
+    out = tmp_path / "out"
+    run = run_batch([UrlInput(url=f"https://source.test/{name}.pdf") for name in ("a", "b")],
+                    out, SimpleNamespace(handle=handle))
+    assert len(calls) == run["mineru_requests"]["submit"]["requests"] == 1
+    assert all(report["run"]["state"] == "failed" for report in read_batch_reports(out, run))
 
 
 def test_mixed_batch_uses_one_shared_poll_and_retains_order_and_progress(tmp_path, monkeypatch, caplog):

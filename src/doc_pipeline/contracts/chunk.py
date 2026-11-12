@@ -124,7 +124,7 @@ class ChunkCitations(Model):
 class ChunkMetadata(Model):
     document_id: str
     document_version: str | None
-    source_sha256: Sha256
+    source_sha256: Sha256 | None
     chunk_sha256: Sha256
     source_type: str
     content_status: Literal["parsed", "partial", "unparsed"]

@@ -1,7 +1,6 @@
 import logging
 import re
 import tempfile
-import uuid
 from collections import defaultdict
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
@@ -28,6 +27,7 @@ from doc_pipeline.contracts.core import (
     PipelineError,
     SourceIdentity,
     TextSpan,
+    UrlInput,
 )
 from doc_pipeline.contracts.document import Image as DocumentImage
 from doc_pipeline.contracts.document import MarkdownMapping, Opaque, ParsedContent
@@ -46,15 +46,19 @@ from doc_pipeline.contracts.run import (
     NATIVE_FORMATS as TEXT_FORMATS,
 )
 from doc_pipeline.parsed_content.md_renderer import render_markdown
+from doc_pipeline.parsers.multimodal.archive import open_validated_archive
 from doc_pipeline.parsers.multimodal.client import ArchiveFailure, ArchiveSuccess, obtain_archives
 from doc_pipeline.services.embeddings import embed_chunks
 from doc_pipeline.services.io import (
+    capture_bytes,
     capture_file,
+    capture_url,
     empty_destination,
     file_digest,
     install_output,
     json_bytes,
     provider_reason,
+    source_url,
     staging_directory,
     write_bytes,
     write_jsonl,
@@ -93,7 +97,7 @@ def _locate_issues(issues: Issues, mappings: list[MarkdownMapping], chunks: list
                                  for block_id, ids in body_chunks.items()})
 
 
-def _parsed_issues(issues: Issues, parsed: ParsedContent, source: FileRef) -> None:
+def _parsed_issues(issues: Issues, parsed: ParsedContent, source: FileRef | None) -> None:
     for block in parsed.blocks:
         lines, pages = set(), set()
         for location in block.locations:
@@ -154,12 +158,17 @@ def _result_summary(chunks: list[ExportedChunk], vectors: list[dict], errors: li
     }
 
 
-def validate_source(path: Path, filename: str, limits: Limits) -> str:
-    if Path(filename).name != filename or "\\" in filename or not filename:
+def _source_kind(filename: str) -> str:
+    if Path(filename).name != filename or "\\" in filename:
         raise PipelineError("intake", "invalid_filename")
     kind = Path(filename).suffix.lower().lstrip(".")
     if kind not in TEXT_FORMATS | REMOTE_FORMATS:
         raise PipelineError("intake", "unsupported_format")
+    return kind
+
+
+def validate_source(path: Path, filename: str, limits: Limits) -> str:
+    kind = _source_kind(filename)
     if path.stat().st_size > limits.max_source_bytes:
         raise PipelineError("intake", "source_too_large")
     with path.open("rb") as stream:
@@ -206,9 +215,17 @@ def validate_source(path: Path, filename: str, limits: Limits) -> str:
 @dataclass(frozen=True)
 class _CapturedInput:
     input: InputFile
-    original_path: Path
+    original_path: Path | None
     ref: FileRef
-    identity: SourceIdentity
+
+
+def _capture_assets(source: InputFile | UrlInput, directory: Path, limits: Limits) -> dict[str, Path]:
+    assets = {}
+    for index, (key, asset) in enumerate(sorted(source.assets.items())):
+        target = directory / str(index)
+        capture_file(asset, target, limits.max_source_bytes, "asset_too_large")
+        assets[key] = target
+    return assets
 
 
 def _capture_source(source: InputFile, directory: Path, limits: Limits, record: ExecutionRecord) -> _CapturedInput:
@@ -216,26 +233,18 @@ def _capture_source(source: InputFile, directory: Path, limits: Limits, record: 
     if not path.name or "\\" in path.name or path.name in {".", ".."}:
         raise PipelineError("intake", "invalid_filename")
     original_path = path.resolve()
+    record.local_target = original_path
     original = directory / "source" / path.name
     checksum = capture_file(original_path, original, limits.max_source_bytes, "source_too_large")
     record.sha256, record.source_bytes = checksum, original.stat().st_size
     ref = FileRef(path=str(original_path), sha256=checksum)
-    identity = source.identity or SourceIdentity(document_id=str(uuid.uuid5(uuid.NAMESPACE_URL, original_path.as_uri())))
-    identity = SourceIdentity(
-        document_id=identity.document_id, version=identity.version,
-        uri=identity.uri or original_path.as_uri(), name=identity.name or path.name,
-    )
-    assets = {}
-    for index, (key, asset) in enumerate(sorted(source.assets.items())):
-        target = directory / "dependencies" / str(index)
-        capture_file(asset, target, limits.max_source_bytes, "asset_too_large")
-        assets[key] = target
-    return _CapturedInput(source.model_copy(update={"path": original, "assets": assets}), original_path, ref, identity)
+    assets = _capture_assets(source, directory / "dependencies", limits)
+    return _CapturedInput(source.model_copy(update={"path": original, "assets": assets}), original_path, ref)
 
 
 @dataclass(frozen=True)
 class _Document:
-    captured: _CapturedInput
+    captured: _CapturedInput | None
     kind: str
     output_dir: Path
     staging: Path
@@ -243,7 +252,7 @@ class _Document:
     output_root: Path
 
 
-def _intake(source: InputFile, output_dir: Path, limits: Limits, record: ExecutionRecord,
+def _intake(source: InputFile | UrlInput, output_dir: Path, limits: Limits, record: ExecutionRecord,
             scope: ExitStack, *, output_root: Path | None = None) -> _Document:
     record.progress("intake")
     output_dir = scope.enter_context(empty_destination(output_dir))
@@ -252,28 +261,111 @@ def _intake(source: InputFile, output_dir: Path, limits: Limits, record: Executi
         work = scope.enter_context(staging_directory(output_dir))
         staging = work / "out"
         staging.mkdir()
-        captured = _capture_source(source, work / "capture", limits, record)
-        kind = validate_source(captured.input.path, source.path.name, limits)
+        if isinstance(source, UrlInput):
+            source_url(source.request_url, "intake")
+            kind = _source_kind(source.filename)
+            captured = None
+        else:
+            captured = _capture_source(source, work / "capture", limits, record)
+            kind = validate_source(captured.input.path, source.path.name, limits)
     return _Document(captured, kind, output_dir, staging, record, output_root or output_dir)
 
 
+def _capture_native_url(source: UrlInput, document: _Document, limits: Limits,
+                        client: httpx.Client | None, timeout: float) -> _CapturedInput:
+    staging, record = document.staging, document.record
+    original = staging / "source" / source.filename
+    record.progress("source_download")
+    with record.measure("acquire"):
+        checksum = capture_url(source.request_url, original, limits.max_source_bytes, timeout, client)
+        record.sha256, record.source_bytes = checksum, original.stat().st_size
+        validate_source(original, source.filename, limits)
+        assets = _capture_assets(source, staging.parent / "dependencies", limits)
+    ref = FileRef(path=original.relative_to(staging).as_posix(), sha256=checksum)
+    return _CapturedInput(InputFile(path=original, encoding=source.encoding, assets=assets), None, ref)
+
+
+@dataclass(frozen=True)
+class _ArchiveOrigin:
+    path: Path
+    ref: FileRef
+    member: str
+
+
+def _capture_archive_origin(archive: ZipFile, document: _Document, limits: Limits) -> _ArchiveOrigin | None:
+    record, staging = document.record, document.staging
+    exact, converted = [], []
+    for member in archive.infolist():
+        path = Path(member.filename)
+        kind = path.suffix.lower().lstrip(".")
+        if not member.is_dir() and path.stem.endswith("_origin") and kind in REMOTE_FORMATS:
+            (exact if kind == document.kind else converted).append((member, kind))
+
+    for candidates in (exact, converted):
+        chosen = None
+        for member, kind in candidates:
+            if member.file_size > limits.max_source_bytes:
+                continue
+            candidate = staging.parent / f"candidate.{kind}"
+            with archive.open(member) as stream, candidate.open("xb") as snapshot:
+                checksum = capture_bytes(iter(lambda: stream.read(1024 * 1024), b""), snapshot,
+                                         limits.max_source_bytes, "parse", "source_too_large")
+            try:
+                validate_source(candidate, candidate.name, limits)
+            except (PipelineError, OSError, SyntaxError, TypeError, LookupError, AttributeError,
+                    RuntimeError, OverflowError):
+                candidate.unlink()
+                continue
+            if chosen is not None:
+                record.issues.add("parse", "mineru_origin_ambiguous", action="unverified")
+                return None
+            selected = staging.parent / f"selected.{kind}"
+            candidate.replace(selected)
+            chosen = selected, checksum, member.filename
+        if chosen is not None:
+            selected, checksum, member_name = chosen
+            original = staging / "source" / f"origin{selected.suffix}"
+            original.parent.mkdir()
+            selected.replace(original)
+            record.sha256, record.source_bytes = checksum, original.stat().st_size
+            ref = FileRef(path=original.relative_to(staging).as_posix(), sha256=checksum)
+            return _ArchiveOrigin(original, ref, member_name)
+    code = "mineru_origin_invalid" if exact or converted else "mineru_origin_missing"
+    record.issues.add("parse", code, action="unverified")
+    return None
+
+
 def _finalize(document: _Document, config: Config, client: httpx.Client,
-              limits: Limits, archive: Path | None = None) -> dict:
+              limits: Limits, archive: Path | None = None, *, source_client: httpx.Client | None = None) -> dict:
     output_dir, record = document.output_dir, document.record
     captured, staging = document.captured, document.staging
+    if archive is None and isinstance(record.source, UrlInput):
+        captured = _capture_native_url(record.source, document, limits, source_client, config.request_timeout_seconds)
+    source_ref = captured.ref if captured else None
     record.progress("parse")
     with record.measure("parse"):
         if archive is None:
             from doc_pipeline.parsers.text.parser import parse_text_document
 
-            parsed = parse_text_document(captured.input, captured.ref, staging, source_dir=captured.original_path.parent,
-                                         max_asset_bytes=limits.max_source_bytes, output_root=document.output_root)
+            assert captured is not None
+            original_dir = captured.original_path.parent if captured.original_path else None
+            parsed = parse_text_document(captured.input, captured.ref, staging, source_dir=original_dir,
+                                         max_asset_bytes=limits.max_source_bytes, output_root=document.output_root,
+                                         resolve_local_assets=original_dir is not None)
         else:
             from doc_pipeline.parsers.multimodal.parser import decode_archive
 
-            parsed = decode_archive(captured.ref, archive, staging, limits, source_type=document.kind,
-                                    original_path=captured.input.path)
-        _parsed_issues(record.issues, parsed, captured.ref)
+            if captured is not None:
+                parsed = decode_archive(source_ref, archive, staging, limits, source_type=document.kind,
+                                        original_path=captured.input.path)
+            else:
+                with open_validated_archive(archive, limits) as validated:
+                    origin = _capture_archive_origin(validated, document, limits)
+                    source_ref = origin.ref if origin else None
+                    parsed = decode_archive(source_ref, validated, staging, limits, source_type=document.kind,
+                                            original_path=origin.path if origin else None,
+                                            origin_member=origin.member if origin else None)
+        _parsed_issues(record.issues, parsed, source_ref)
         if record.mineru is not None and parsed.provider_metadata is not None:
             for name in ("backend", "version", "ocr_enabled"):
                 setattr(record.mineru, name, getattr(parsed.provider_metadata, name))
@@ -320,7 +412,7 @@ def _finalize(document: _Document, config: Config, client: httpx.Client,
         with record.measure("write"):
             asset_digests = _finalize_assets(parsed, staging)
             exported = list(export_chunks(
-                chunks, parsed, source=captured.ref, identity=captured.identity,
+                chunks, parsed, source=source_ref, identity=record.identity,
                 source_type=document.kind, asset_digests=asset_digests,
             ))
             write_bytes(staging / "content.md", markdown.encode())
@@ -455,25 +547,34 @@ def _acquire(documents: list[_Document], config: Config, client, work: Path,
             checkpoint(record)
 
     return obtain_archives(
-        [(document.record.index, document.captured.input) for document in documents], config, client, work,
+        [(document.record.index, document.captured.input if document.captured else document.record.source)
+         for document in documents], config, client, work,
         on_progress=progress, on_observation=observation, on_issue=issue, on_outcome=outcome, requests=requests,
     )
 
 
-def process_file(path: Path, output_dir: Path, config: Config | None = None, *,
-                 assets: dict[str, Path] | None = None, encoding: str = "utf-8",
+def process_file(path: Path | UrlInput, output_dir: Path, config: Config | None = None, *,
+                 assets: dict[str, Path] | None = None, encoding: str | None = None,
                  identity: SourceIdentity | None = None, client: httpx.Client | None = None,
                  on_progress: ProgressCallback | None = None) -> dict:
     config = config or Config()
     limits = Limits()
-    source = InputFile(path=path, assets=assets or {}, encoding=encoding, identity=identity)
+    if isinstance(path, UrlInput):
+        source = UrlInput(
+            url=path.url, assets=path.assets if assets is None else assets,
+            encoding=path.encoding if encoding is None else encoding,
+            identity=path.identity if identity is None else identity,
+        )
+    else:
+        source = InputFile(path=path, assets=assets or {}, encoding="utf-8" if encoding is None else encoding,
+                           identity=identity)
     record = ExecutionRecord(RunClock(), 0, source, config, on_progress)
     with ExitStack() as scope:
         try:
             document = _intake(source, output_dir, limits, record, scope)
             http = scope.enter_context(_http_client(client, config))
             if document.kind in TEXT_FORMATS:
-                report = _finalize(document, config, http, limits)
+                report = _finalize(document, config, http, limits, source_client=client)
             else:
                 with tempfile.TemporaryDirectory(prefix="doc-pipeline-") as temporary:
                     [outcome] = _acquire([document], config, http, Path(temporary))
@@ -489,10 +590,11 @@ def process_file(path: Path, output_dir: Path, config: Config | None = None, *,
 
 
 def _process_document(document: _Document, config: Config, client: httpx.Client, limits: Limits,
-                      outcome: ArchiveSuccess | ArchiveFailure | None = None) -> dict | None:
+                      outcome: ArchiveSuccess | ArchiveFailure | None = None, *,
+                      source_client: httpx.Client | None = None) -> dict | None:
     try:
         if outcome is None:
-            report = _finalize(document, config, client, limits)
+            report = _finalize(document, config, client, limits, source_client=source_client)
         else:
             report = _finish_remote(document, outcome, config, client, limits)
     except BaseException as error:
@@ -504,7 +606,7 @@ def _process_document(document: _Document, config: Config, client: httpx.Client,
     return report
 
 
-def process_files(paths: Iterable[Path | InputFile], output_dir: Path, config: Config | None = None, *,
+def process_files(paths: Iterable[Path | InputFile | UrlInput], output_dir: Path, config: Config | None = None, *,
                   client: httpx.Client | None = None,
                   on_progress: ProgressCallback | None = None) -> dict:
     config = config or Config()
@@ -519,7 +621,7 @@ def process_files(paths: Iterable[Path | InputFile], output_dir: Path, config: C
 
 def _process_batch(inputs, output_dir, config, client, on_progress, clock, scope) -> dict:
     limits = Limits()
-    local, remote, records = [], [], []
+    native, uploads, links, records = [], [], [], []
     requests = MinerURequests()
     writer = _ReportWriter(output_dir / "run.json")
 
@@ -542,13 +644,13 @@ def _process_batch(inputs, output_dir, config, client, on_progress, clock, scope
         return {
             "schema_version": 2, "run": clock.snapshot(state, finished),
             "settings": {"local_workers": config.local_workers, "mineru_batch_size": config.mineru.batch_size},
-            "mineru_requests": requests.snapshot() if remote else NA, "files": files,
+            "mineru_requests": requests.snapshot() if uploads or links else NA, "files": files,
         }
 
     try:
         writer(snapshot())
         for index, item in enumerate(inputs):
-            source = item if isinstance(item, InputFile) else InputFile(path=item)
+            source = item if isinstance(item, (InputFile, UrlInput)) else InputFile(path=item)
             record = ExecutionRecord(RunClock(run_id=clock.run_id), index, source, config, on_progress)
             records.append(record)
             try:
@@ -558,21 +660,26 @@ def _process_batch(inputs, output_dir, config, client, on_progress, clock, scope
                 _fail_record(record, error)
                 record.progress(record.status)
             else:
-                (local if document.kind in TEXT_FORMATS else remote).append(document)
+                if document.kind in TEXT_FORMATS:
+                    native.append(document)
+                else:
+                    (links if isinstance(source, UrlInput) else uploads).append(document)
             writer(snapshot())
 
         with _http_client(client, config) as http:
             pool = ThreadPoolExecutor(max_workers=config.local_workers)
             try:
-                futures = [pool.submit(_process_document, document, config, http, limits) for document in local]
+                futures = [pool.submit(_process_document, document, config, http, limits, source_client=client)
+                           for document in native]
                 size = config.mineru.batch_size
-                for start in range(0, len(remote), size):
-                    group = remote[start:start + size]
-                    with tempfile.TemporaryDirectory(prefix="doc-pipeline-") as temporary:
-                        outcomes = _acquire(group, config, http, Path(temporary), requests)
-                        for document, outcome in zip(group, outcomes, strict=True):
-                            _process_document(document, config, http, limits, outcome)
-                            writer(snapshot())
+                for documents in (uploads, links):
+                    for start in range(0, len(documents), size):
+                        group = documents[start:start + size]
+                        with tempfile.TemporaryDirectory(prefix="doc-pipeline-") as temporary:
+                            outcomes = _acquire(group, config, http, Path(temporary), requests)
+                            for document, outcome in zip(group, outcomes, strict=True):
+                                _process_document(document, config, http, limits, outcome)
+                                writer(snapshot())
                 for future in futures:
                     future.result()
                     writer(snapshot())

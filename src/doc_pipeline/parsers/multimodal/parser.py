@@ -2,6 +2,7 @@ import hashlib
 import json
 import posixpath
 import re
+from contextlib import nullcontext
 from pathlib import Path, PurePosixPath
 from typing import Any
 from xml.etree import ElementTree
@@ -88,13 +89,15 @@ def _provider_metadata(layout: dict[str, Any]) -> ProviderMetadata:
 
 
 def decode_archive(
-    source_ref: FileRef,
-    archive_path: Path,
+    source_ref: FileRef | None,
+    archive_path: Path | ZipFile,
     output_dir: Path,
     limits: Limits,
-    *, source_type: str | None = None, original_path: Path | None = None,
+    *, source_type: str | None = None, original_path: Path | None = None, origin_member: str | None = None,
 ) -> ParsedContent:
-    with open_validated_archive(archive_path, limits) as archive:
+    archived_source = isinstance(archive_path, ZipFile)
+    scope = nullcontext(archive_path) if archived_source else open_validated_archive(archive_path, limits)
+    with scope as archive:
         names = [member.filename for member in archive.infolist() if not member.is_dir()]
         primary = [
             name
@@ -107,11 +110,15 @@ def decode_archive(
         groups = _page_groups(archive.read(member))
 
         diagnostics: list[Diagnostic] = []
-        source_type = source_type or Path(source_ref.path).suffix.lower().lstrip(".")
+        if source_type is None and source_ref is not None:
+            source_type = Path(source_ref.path).suffix.lower().lstrip(".")
         pdf_pages, office = [], {}
-        if original_path is not None and source_type in {"pptx", "xlsx"}:
+        if original_path is not None and source_ref is not None and source_type in {"pptx", "xlsx"}:
             origins = [name for name in names if PurePosixPath(name).name.endswith(f"_origin.{source_type}")]
-            if len(origins) == 1:
+            if archived_source:
+                if original_path.suffix == "." + source_type:
+                    office = office_locations(original_path, source_type, groups, source_ref)
+            elif len(origins) == 1:
                 if hashlib.sha256(archive.read(origins[0])).hexdigest() == source_ref.sha256:
                     office = office_locations(original_path, source_type, groups, source_ref)
                 else:
@@ -125,14 +132,19 @@ def decode_archive(
         pdf_ref = None
         frames = []
         candidates = [name for name in names if PurePosixPath(name).name.endswith("_origin.pdf")]
+        if archived_source:
+            candidates = [origin_member] if original_path is not None and original_path.suffix == ".pdf" else []
         if len(candidates) == 1:
-            pdf = archive.read(candidates[0])
-            digest = hashlib.sha256(pdf).hexdigest()
+            if archived_source:
+                pdf, digest = original_path.read_bytes(), source_ref.sha256
+            else:
+                pdf = archive.read(candidates[0])
+                digest = hashlib.sha256(pdf).hexdigest()
             if original_path is not None and source_type == "pdf":
                 pdf_pages = page_correspondence(original_path, pdf, identical=digest == source_ref.sha256)
             frames = pdf_page_frames(pdf)
             if frames:
-                if source_type == "pdf" and digest == source_ref.sha256:
+                if source_type == "pdf" and source_ref is not None and digest == source_ref.sha256:
                     pdf_ref = source_ref
                 else:
                     pdf_ref = FileRef(path=candidates[0], sha256=digest)
@@ -174,7 +186,7 @@ def decode_archive(
                         "location_precision": "enclosing",
                         "location_error": None,
                     })
-                elif source_type == "pdf" and pdf_ref != source_ref and block.locations:
+                elif source_type == "pdf" and source_ref is not None and pdf_ref != source_ref and block.locations:
                     original_pages = [
                         PagePosition(source=source_ref, number=loc.page_index + 1) for loc in block.locations
                         if loc.page_index + 1 in mapped_pages

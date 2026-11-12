@@ -1,14 +1,26 @@
 import json
+import logging
+import uuid
 
 import httpx
 import pytest
 from markdown_it import MarkdownIt
 from PIL import Image
 
-from doc_pipeline import Config, InputFile, SourceIdentity, process_file, process_files
+from doc_pipeline import (
+    Config,
+    InputFile,
+    PipelineError,
+    SourceIdentity,
+    UrlInput,
+    pipeline,
+    process_file,
+    process_files,
+)
 from doc_pipeline.chunking.citations import chunk_digest, digest
 from doc_pipeline.contracts.chunk import ExportedChunk
-from tests.support import read_output
+from doc_pipeline.contracts.config import Limits
+from tests.support import read_output, read_report
 
 
 @pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
@@ -32,6 +44,108 @@ def test_exported_markdown_citations_cover_their_blocks_across_newline_styles(tm
 
 def _read_chunks(root):
     return [ExportedChunk.model_validate_json(line) for line in (root / "chunks.jsonl").read_text().split("\n") if line]
+
+
+def test_native_url_follows_redirect_and_preserves_signed_query_and_source_bytes(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    source_url = "https://source.test/notes/caf%C3%A9.md?signature=Private%2fSigned+Query&item=1#viewer"
+    raw = "# Source\r\n\r\ncafé\r\n\r\n![Explicit](plot.png) ![Missing](nearby.png)\r\n".encode("latin-1")
+    Image.new("RGB", (2, 2)).save(tmp_path / "plot.png")
+    Image.new("RGB", (2, 2)).save(tmp_path / "nearby.png")
+    monkeypatch.chdir(tmp_path)
+    requests, progress = [], []
+
+    def handle(request):
+        requests.append(request)
+        assert not {"authorization", "cookie", "x-private"} & set(request.headers)
+        if request.headers["host"] == "source.test":
+            assert request.url.host == "source.test"
+            assert request.url.raw_path == b"/notes/caf%C3%A9.md?signature=Private%2fSigned+Query&item=1"
+            return httpx.Response(302, headers={"Location": "http://127.0.0.1/document?key=a%2Bb"})
+        assert request.headers["host"] == "127.0.0.1"
+        assert request.url.host == "127.0.0.1"
+        assert request.url.raw_path == b"/document?key=a%2Bb"
+        return httpx.Response(200, content=raw)
+
+    out = tmp_path / "out"
+    item = UrlInput(url=source_url, encoding="latin-1", assets={"plot.png": tmp_path / "plot.png"})
+    with httpx.Client(transport=httpx.MockTransport(handle), auth=("a", "b"), cookies={"session": "private"},
+                      headers={"X-Private": "private"}, params={"private": "default"}) as client:
+        report = process_file(item, out, client=client, on_progress=progress.append)
+    assert len(requests) == 2
+    assert [event.stage for event in progress] == ["intake", "source_download", "parse", "complete"]
+    assert all(event.path.name == "café.md" for event in progress)
+    assert (out / "source" / "café.md").read_bytes() == raw
+    assert "café" in (out / "content.md").read_text()
+    assert report["stages"]["acquire"]["state"] == "succeeded"
+    assert report["stages"]["acquire"]["service"] == "n/a"
+    assert report["source"]["bytes"] == len(raw)
+    assert report["source"]["uri"] == "https://source.test/notes/caf%C3%A9.md"
+    assert report["source"]["document_id"] == str(uuid.uuid5(uuid.NAMESPACE_URL, source_url.partition("#")[0]))
+    assert report["source"]["sha256"] == digest(raw)
+    assert len(list((out / "assets").iterdir())) == 1
+    assert any(issue["code"] == "asset_unavailable" and issue["targets"] == [
+        {"unit": "asset", "values": ["nearby.png"]},
+    ] for issue in report["issues"])
+    for row in _read_chunks(out):
+        assert row.citations.source_uri == report["source"]["uri"]
+        assert row.metadata.source_sha256 == digest(raw)
+    assert "Private" not in caplog.text + (out / "report.json").read_text() + (out / "chunks.jsonl").read_text()
+
+
+@pytest.mark.parametrize("location", ["ftp://source.test/private?query=secret",
+                                      "http://user:password@source.test/private?query=secret"])
+def test_native_url_revalidates_a_redirect_before_sending_it(tmp_path, location):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(307, headers={"Location": location})
+
+    out = tmp_path / "out"
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        with pytest.raises(PipelineError, match="unsafe_source_url"):
+            process_file(UrlInput(url="http://source.test/source.txt?query=secret"), out, client=client)
+    assert len(requests) == 1
+    report = read_report(out)
+    assert report["run"]["state"] == "failed"
+    assert report["source"]["uri"] == "http://source.test/source.txt"
+    assert not (out / "source").exists()
+    assert "secret" not in (out / "report.json").read_text()
+
+
+def test_credentialed_url_fails_without_exposing_its_authority_or_query(tmp_path):
+    output = tmp_path / "out"
+    with pytest.raises(PipelineError, match="unsafe_source_url"):
+        process_file(UrlInput(url="https://private-user:private-key@source.test/file.pdf?query=private-signature"),
+                     output)
+    assert read_report(output)["source"]["uri"] is None
+    assert "private-" not in (output / "report.json").read_text()
+
+
+def test_native_url_size_limit_stops_stream_and_publishes_only_failure_report(tmp_path, monkeypatch):
+    consumed = []
+
+    class SourceStream(httpx.SyncByteStream):
+        def __iter__(self):
+            for chunk in (b"hello", b" world", b" unread"):
+                consumed.append(chunk)
+                yield chunk
+
+    monkeypatch.setattr(pipeline, "Limits", lambda: Limits(max_source_bytes=10))
+    identity = SourceIdentity(document_id="registry-7", version="3", uri="catalog://source/7", name="Note")
+    out = tmp_path / "out"
+    with httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200, stream=SourceStream()))) as client:
+        with pytest.raises(PipelineError, match="source_too_large"):
+            process_file(UrlInput(url="http://8.8.8.8/document.txt?private=key"), out,
+                         identity=identity, client=client)
+    assert consumed == [b"hello", b" world"]
+    assert {item.name for item in out.iterdir()} == {"report.json"}
+    report = read_report(out)
+    assert report["source"] == {
+        "name": "Note", "uri": "catalog://source/7", "document_id": "registry-7", "document_version": "3",
+        "format": "txt", "sha256": None, "bytes": None,
+    }
 
 
 def test_fingerprint_golden_vector():

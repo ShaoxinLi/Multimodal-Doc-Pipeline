@@ -4,7 +4,7 @@
 
 将文档转换为 Markdown、结构化分块和来源引用，供检索流水线使用。可通过兼容 OpenAI 的服务生成嵌入向量，支持 CLI、Python API 和 Docker。
 
-文本格式在本地处理，无需 API key。PDF、Office 和图像文件会上传至 [MinerU](https://github.com/opendatalab/MinerU)，需要 MinerU API key。
+文本格式在本地处理，无需 API key。PDF、Office 和图像输入由 [MinerU](https://github.com/opendatalab/MinerU) 处理，需要 MinerU API key。
 
 [快速开始](#快速开始) · [获取 Docker 镜像](#获取-docker-镜像) · [配置](#配置) · [输出](#输出) · [文档](#文档)
 
@@ -33,6 +33,19 @@ cat path/to/output/report.json
 ```
 
 检查 `parse_status` 和 `embedding_errors`。退出码为 `0` 时，解析结果仍可能不完整。
+
+### 试用样本
+
+[样本下载清单](samples/urls.txt)每行提供一个输入文件的直链。链接使用完整的 Git 提交 SHA，重复下载时可获得同一版本的文件。
+
+在项目根目录直接处理纯文本样本的 URL。此示例无需 API key。
+
+```sh
+uv run doc-pipeline "$(grep '/samples/txt/txt_001_rfc_rfc2119_key_words\.txt$' samples/urls.txt)" \
+	--out path/to/sample-output
+```
+
+如需下载全部样本及配套资源，请使用[样本压缩包](https://github.com/ShaoxinLi/Multimodal-Doc-Pipeline/archive/9174b2a3788620e9dc9615834da8015cf458e43e.tar.gz)。将解压后的 `samples/` 目录内容复制到本地的 `samples/` 目录。保留文档与 `assets/` 目录的相对位置，确保文档中的资源路径有效。
 
 ## 获取 Docker 镜像
 
@@ -82,6 +95,8 @@ docker run --rm --user "$(id -u):$(id -g)" \
 | 图像 | `.png`, `.jpg`, `.jpeg`, `.jp2`, `.webp`, `.gif`, `.bmp` | MinerU |
 
 每个文件不超过 200 MB，每份 PDF 不超过 200 页。不支持 HTML 和加密 PDF。
+
+同一条命令可以混传本地路径和 HTTP(S) 文件直链。URL 路径须包含受支持的扩展名，签名 URL 请用引号包裹。pipeline 下载文本输入，并将 PDF、Office 和图像 URL 直接提交给 MinerU。如果 MinerU 无法访问某条直链，可自行下载后用本地路径处理。
 
 ## 配置
 

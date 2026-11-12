@@ -2,6 +2,7 @@ import re
 from bisect import bisect_right
 from pathlib import Path
 from typing import Annotated, Literal
+from urllib.parse import unquote, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -37,6 +38,38 @@ class InputFile(Model):
     assets: dict[str, Path] = Field(default_factory=dict)
     encoding: str = "utf-8"
     identity: SourceIdentity | None = None
+
+
+class UrlInput(Model):
+    url: str = Field(repr=False)
+    encoding: str = "utf-8"
+    assets: dict[str, Path] = Field(default_factory=dict, repr=False)
+    identity: SourceIdentity | None = None
+
+    @property
+    def request_url(self) -> str:
+        return self.url.partition("#")[0]
+
+    @property
+    def durable_uri(self) -> str:
+        uri = self.request_url.partition("?")[0]
+        try:
+            parsed = urlsplit(uri)
+            if parsed.scheme in {"http", "https"} and parsed.hostname and "@" not in parsed.netloc:
+                return uri
+        except ValueError:
+            pass
+        return ""
+
+    @property
+    def filename(self) -> str:
+        try:
+            name = unquote(urlsplit(self.durable_uri).path.rsplit("/", 1)[-1], errors="strict")
+        except ValueError:
+            return ""
+        if (name in {".", ".."} or any(char in "/\\\0" or ord(char) < 32 or ord(char) == 127 for char in name)):
+            return ""
+        return name
 
 
 class FileRef(Model):
